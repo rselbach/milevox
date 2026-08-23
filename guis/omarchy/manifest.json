@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.rselbach.milevox",
   "name": "Milevox",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "author": "Roberto Selbach",
   "license": "MIT",
   "description": "Speech-to-text controls, live preview, and status for Omarchy.",

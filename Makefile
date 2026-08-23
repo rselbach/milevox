@@ -1,6 +1,6 @@
-.PHONY: check check-all check-guis check-gui-shell check-shell format install \
-	install-omarchy-gui package package-arch package-core package-omarchy uninstall \
-	uninstall-omarchy-gui \
+.PHONY: check check-all check-guis check-gui-shell check-release-metadata \
+	check-shell format install install-omarchy-gui package package-arch \
+	package-core package-omarchy prepare-release uninstall uninstall-omarchy-gui \
 	validate-omarchy-gui
 
 check: check-shell
@@ -10,19 +10,32 @@ check: check-shell
 
 check-all: check check-guis
 
-check-guis: check-gui-shell validate-omarchy-gui
+check-guis: check-gui-shell check-release-metadata validate-omarchy-gui
+
+check-release-metadata:
+	@package_version="$$(awk -F '"' \
+		'/^version = / { print $$2; exit }' Cargo.toml)"; \
+	manifest_version="$$(jq -r '.version // empty' \
+		guis/omarchy/manifest.json)"; \
+	if [ "$${manifest_version}" != "$${package_version}" ]; then \
+		echo "Omarchy manifest version $${manifest_version}" \
+			"does not match $${package_version}" >&2; \
+		exit 1; \
+	fi
+	./tests/prepare-release.sh
 
 check-shell:
 	bash -n install.sh uninstall.sh scripts/download-model.sh \
 		scripts/setup-user.sh \
 		scripts/package-arch-release.sh scripts/package-omarchy-release.sh \
-		scripts/package-release.sh \
+		scripts/package-release.sh scripts/prepare-release.sh \
 		guis/omarchy/milevox-omarchy
 	@if command -v shellcheck >/dev/null; then \
 		shellcheck install.sh uninstall.sh scripts/download-model.sh \
 			scripts/setup-user.sh \
 			scripts/package-arch-release.sh \
 			scripts/package-omarchy-release.sh scripts/package-release.sh \
+			scripts/prepare-release.sh \
 			guis/omarchy/milevox-omarchy; \
 	else \
 		echo "shellcheck not installed; skipped"; \
@@ -65,6 +78,9 @@ package-core:
 
 package-omarchy:
 	./scripts/package-omarchy-release.sh
+
+prepare-release:
+	./scripts/prepare-release.sh "$(VERSION)"
 
 uninstall:
 	./uninstall.sh

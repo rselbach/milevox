@@ -29,12 +29,15 @@ jobs:
         run: |
           bash -n install.sh uninstall.sh scripts/*.sh \
             guis/omarchy/install.sh guis/omarchy/uninstall.sh \
-            guis/omarchy/milevox-omarchy
+            guis/omarchy/milevox-omarchy tests/*.sh
+      - name: Run shell tests
+        run: ./tests/omarchy-install.sh
       - name: Validate Omarchy GUI metadata
         run: |
           test "$(jq -r .schemaVersion guis/omarchy/manifest.json)" = "1"
           test -f guis/omarchy/Panel.qml
           test -f guis/omarchy/MilevoxOverlay.qml
+          make check-release-metadata
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
