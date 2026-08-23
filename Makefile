@@ -29,12 +29,15 @@ check-shell:
 	fi
 
 check-gui-shell:
-	bash -n guis/omarchy/install.sh guis/omarchy/uninstall.sh
+	bash -n guis/omarchy/install.sh guis/omarchy/uninstall.sh \
+		tests/omarchy-install.sh
 	@if command -v shellcheck >/dev/null; then \
-		shellcheck guis/omarchy/install.sh guis/omarchy/uninstall.sh; \
+		shellcheck guis/omarchy/install.sh guis/omarchy/uninstall.sh \
+			tests/omarchy-install.sh; \
 	else \
 		echo "shellcheck not installed; skipped"; \
 	fi
+	./tests/omarchy-install.sh
 
 format:
 	cargo fmt --all

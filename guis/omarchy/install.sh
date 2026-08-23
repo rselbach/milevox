@@ -116,7 +116,7 @@ install_keybindings() {
   printf 'hl.unbind("%s")\n' "${push_to_talk_key}" >>"${staged_file}"
   printf 'o.bind("%s", "Toggle Milevox dictation", ' \
     "${toggle_key}" >>"${staged_file}"
-  printf '"milevox record toggle")\n' >>"${staged_file}"
+  printf '"milevox record toggle", { release = true })\n' >>"${staged_file}"
   printf 'o.bind("%s", "Start Milevox dictation", ' \
     "${push_to_talk_key}" >>"${staged_file}"
   printf '"milevox record start")\n' >>"${staged_file}"
