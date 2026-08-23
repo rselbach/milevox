@@ -72,6 +72,7 @@ const CORRECTION_PHRASES: &[&str] = &[
     "cancel",
     "actually",
     "no wait",
+    "wait no",
     "wait wait",
     "oops",
     "sorry",
@@ -108,8 +109,13 @@ pub fn api_key_env(config: &PostProcessingConfig) -> &str {
 
 pub struct RefinedTranscript {
     pub text: String,
-    pub provider_text: Option<String>,
+    pub provider_attempts: Vec<ProviderAttempt>,
     pub warning: Option<String>,
+}
+
+pub struct ProviderAttempt {
+    pub text: String,
+    pub validation_error: Option<String>,
 }
 
 struct ProviderSettings<'a> {
@@ -134,7 +140,7 @@ pub async fn refine(
     if !config.enabled {
         return RefinedTranscript {
             text: raw.to_owned(),
-            provider_text: None,
+            provider_attempts: Vec::new(),
             warning: None,
         };
     }
@@ -161,9 +167,14 @@ pub async fn refine(
         Ok(processed) => processed,
         Err(error) => return fallback(raw, error),
     };
-    if suspicious_error(raw, &first).is_none() {
+    let first_error = suspicious_error(raw, &first);
+    let mut provider_attempts = vec![ProviderAttempt {
+        text: first.clone(),
+        validation_error: first_error.clone(),
+    }];
+    if first_error.is_none() {
         return RefinedTranscript {
-            provider_text: Some(first.clone()),
+            provider_attempts,
             text: first,
             warning: None,
         };
@@ -171,20 +182,32 @@ pub async fn refine(
 
     match request(&client, &settings, api_key, raw).await {
         Ok(processed) => match suspicious_error(raw, &processed) {
-            None => RefinedTranscript {
-                provider_text: Some(processed.clone()),
-                text: processed,
-                warning: None,
-            },
-            Some(reason) => fallback_with_provider(
-                raw,
-                processed,
-                anyhow::anyhow!("{} returned suspicious text twice: {reason}", settings.name),
-            ),
+            None => {
+                provider_attempts.push(ProviderAttempt {
+                    text: processed.clone(),
+                    validation_error: None,
+                });
+                RefinedTranscript {
+                    provider_attempts,
+                    text: processed,
+                    warning: None,
+                }
+            }
+            Some(reason) => {
+                provider_attempts.push(ProviderAttempt {
+                    text: processed,
+                    validation_error: Some(reason.clone()),
+                });
+                fallback_with_attempts(
+                    raw,
+                    provider_attempts,
+                    anyhow::anyhow!("{} returned suspicious text twice: {reason}", settings.name),
+                )
+            }
         },
-        Err(error) => fallback_with_provider(
+        Err(error) => fallback_with_attempts(
             raw,
-            first,
+            provider_attempts,
             error.context(format!("{} retry failed", settings.name)),
         ),
     }
@@ -413,19 +436,19 @@ fn http_error(name: &str, status: StatusCode, bytes: &[u8]) -> Result<String> {
 fn fallback(raw: &str, error: anyhow::Error) -> RefinedTranscript {
     RefinedTranscript {
         text: raw.to_owned(),
-        provider_text: None,
+        provider_attempts: Vec::new(),
         warning: Some(format!("post-processing skipped: {error:#}")),
     }
 }
 
-fn fallback_with_provider(
+fn fallback_with_attempts(
     raw: &str,
-    provider_text: String,
+    provider_attempts: Vec<ProviderAttempt>,
     error: anyhow::Error,
 ) -> RefinedTranscript {
     RefinedTranscript {
         text: raw.to_owned(),
-        provider_text: Some(provider_text),
+        provider_attempts,
         warning: Some(format!("post-processing skipped: {error:#}")),
     }
 }
@@ -644,6 +667,13 @@ mod tests {
         let raw = "Troy Barnes will lead the Greendale team no wait cancel that please";
 
         assert!(suspicious_error(raw, "").is_none());
+    }
+
+    #[test]
+    fn permits_a_replacement_after_wait_no() {
+        let raw = "The release is on Friday. Wait, no. The release is on Tuesday.";
+
+        assert_eq!(suspicious_error(raw, "The release is on Tuesday."), None);
     }
 
     #[test]

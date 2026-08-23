@@ -78,7 +78,7 @@ struct PreviewTranscripts {
 }
 
 struct DebugOutcome<'a> {
-    provider_text: Option<&'a str>,
+    provider_attempts: &'a [post_processing::ProviderAttempt],
     delivered_text: &'a str,
     warning: Option<&'a str>,
     error: Option<&'a str>,
@@ -803,7 +803,7 @@ async fn run_pipeline(
         &raw,
         post_processing_input,
         DebugOutcome {
-            provider_text: refined.provider_text.as_deref(),
+            provider_attempts: &refined.provider_attempts,
             delivered_text: &refined.text,
             warning: refined.warning.as_deref(),
             error: delivery_error.as_deref(),
@@ -837,13 +837,36 @@ fn debug_entry(
 ) -> String {
     let raw_preview = previews.raw.as_deref().unwrap_or("[unavailable]");
     let stabilized_preview = previews.stabilized.as_deref().unwrap_or("[unavailable]");
-    let provider_text = outcome.provider_text.unwrap_or("[unavailable]");
+    let provider_attempts = format_provider_attempts(outcome.provider_attempts);
     let warning = outcome.warning.unwrap_or("[none]");
     let error = outcome.error.unwrap_or("[none]");
     let delivered_text = outcome.delivered_text;
     format!(
-        "=== RECORDING {generation} ===\nLAST RAW PREVIEW:\n{raw_preview}\n\nLAST STABILIZED PREVIEW:\n{stabilized_preview}\n\nFINAL RAW:\n{final_raw}\n\nPOST-PROCESSING INPUT:\n{post_processing_input}\n\nPROVIDER RESPONSE:\n{provider_text}\n\nDELIVERED TEXT:\n{delivered_text}\n\nWARNING:\n{warning}\n\nERROR:\n{error}"
+        "=== RECORDING {generation} ===\nLAST RAW PREVIEW:\n{raw_preview}\n\nLAST STABILIZED PREVIEW:\n{stabilized_preview}\n\nFINAL RAW:\n{final_raw}\n\nPOST-PROCESSING INPUT:\n{post_processing_input}\n\n{provider_attempts}\n\nDELIVERED TEXT:\n{delivered_text}\n\nWARNING:\n{warning}\n\nERROR:\n{error}"
     )
+}
+
+fn format_provider_attempts(attempts: &[post_processing::ProviderAttempt]) -> String {
+    if attempts.is_empty() {
+        return "PROVIDER RESPONSES:\n[unavailable]".to_owned();
+    }
+
+    attempts
+        .iter()
+        .enumerate()
+        .map(|(index, attempt)| {
+            let number = index + 1;
+            let validation = attempt.validation_error.as_deref().map_or_else(
+                || "accepted".to_owned(),
+                |error| format!("rejected: {error}"),
+            );
+            format!(
+                "PROVIDER RESPONSE {number}:\n{}\n\nPROVIDER VALIDATION {number}:\n{validation}",
+                attempt.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn failed_debug_entry(generation: u64, previews: &PreviewTranscripts, error: &str) -> String {
@@ -853,7 +876,7 @@ fn failed_debug_entry(generation: u64, previews: &PreviewTranscripts, error: &st
         "[unavailable]",
         "[unavailable]",
         DebugOutcome {
-            provider_text: None,
+            provider_attempts: &[],
             delivered_text: "[unavailable]",
             warning: None,
             error: Some(error),
@@ -922,13 +945,17 @@ mod tests {
             raw: Some("Troy and Abed in the morning".to_owned()),
             stabilized: Some("Troy and Abed in the morning".to_owned()),
         };
+        let provider_attempts = [post_processing::ProviderAttempt {
+            text: "Troy and Abed in the morning.".to_owned(),
+            validation_error: None,
+        }];
         let comparison = debug_entry(
             7,
             &previews,
             "Troy and a bed in the morning",
             "Troy and Abed in the morning",
             DebugOutcome {
-                provider_text: Some("Troy and Abed in the morning."),
+                provider_attempts: &provider_attempts,
                 delivered_text: "Troy and Abed in the morning.",
                 warning: None,
                 error: None,
@@ -942,10 +969,39 @@ mod tests {
              LAST STABILIZED PREVIEW:\nTroy and Abed in the morning\n\n\
              FINAL RAW:\nTroy and a bed in the morning\n\n\
              POST-PROCESSING INPUT:\nTroy and Abed in the morning\n\n\
-             PROVIDER RESPONSE:\nTroy and Abed in the morning.\n\n\
+             PROVIDER RESPONSE 1:\nTroy and Abed in the morning.\n\n\
+             PROVIDER VALIDATION 1:\naccepted\n\n\
              DELIVERED TEXT:\nTroy and Abed in the morning.\n\n\
              WARNING:\n[none]\n\n\
              ERROR:\n[none]"
+        );
+    }
+
+    #[test]
+    fn diagnostic_records_every_provider_attempt() {
+        let attempts = [
+            post_processing::ProviderAttempt {
+                text: "This is a test.\nThis is another test.".to_owned(),
+                validation_error: Some(
+                    "output changes dictated word 5 (`new` became `this`)".to_owned(),
+                ),
+            },
+            post_processing::ProviderAttempt {
+                text: "This is a test, new line. This is another test.".to_owned(),
+                validation_error: None,
+            },
+        ];
+
+        assert_eq!(
+            format_provider_attempts(&attempts),
+            "PROVIDER RESPONSE 1:\n\
+             This is a test.\nThis is another test.\n\n\
+             PROVIDER VALIDATION 1:\n\
+             rejected: output changes dictated word 5 (`new` became `this`)\n\n\
+             PROVIDER RESPONSE 2:\n\
+             This is a test, new line. This is another test.\n\n\
+             PROVIDER VALIDATION 2:\n\
+             accepted"
         );
     }
 
