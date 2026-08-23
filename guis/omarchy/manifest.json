@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.rselbach.milevox",
+  "name": "Milevox",
+  "version": "0.1.0",
+  "author": "Roberto Selbach",
+  "license": "MIT",
+  "description": "Speech-to-text controls, live preview, and status for Omarchy.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "MilevoxOverlay.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Milevox",
+    "description": "Start, stop, and inspect Milevox dictation.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

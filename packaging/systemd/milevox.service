@@ -1,0 +1,15 @@
+[Unit]
+Description=Milevox speech-to-text daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/milevox daemon
+Restart=on-failure
+RestartSec=5
+Environment=XDG_RUNTIME_DIR=%t
+EnvironmentFile=-%E/milevox/environment
+
+[Install]
+WantedBy=graphical-session.target
