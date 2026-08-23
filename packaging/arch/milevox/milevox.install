@@ -3,11 +3,8 @@ post_install() {
 
 ==> Milevox installation
 
-    Install the speech model for each user:
-      milevox-download-model
-
-    Then enable the user service:
-      systemctl --user enable --now milevox.service
+    Set up Milevox for each desktop user:
+      milevox-setup
 
 EOF
 }

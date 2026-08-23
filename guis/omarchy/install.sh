@@ -27,14 +27,24 @@ usage() {
   cat <<'EOF'
 Usage: ./guis/omarchy/install.sh [options]
 
-Install the Milevox Omarchy plugin and Hyprland keybindings. Install Milevox
-itself from the repository root before installing this GUI.
+Prepare Milevox, then install its Omarchy plugin and Hyprland keybindings.
+Install Milevox itself from the repository root before installing this GUI.
 
 Options:
   --toggle-key KEY        Toggle binding (default: SUPER + CTRL + X)
   --push-to-talk-key KEY  Push-to-talk binding (default: F9)
   -h, --help              Show this help
 EOF
+}
+
+prepare_milevox() {
+  if command -v milevox-setup >/dev/null; then
+    milevox-setup || fail "could not prepare Milevox"
+    return
+  fi
+
+  milevox status >/dev/null 2>&1 ||
+    fail "Milevox is not ready; install it from the repository root first"
 }
 
 require_command() {
@@ -225,6 +235,7 @@ main() {
   plugin_dir="${config_home}/omarchy/plugins/${PLUGIN_ID}"
   bindings_file="${HOME}/.config/hypr/bindings.lua"
 
+  prepare_milevox
   omarchy plugin validate "${source_dir}"
   install_keybindings \
     "${bindings_file}" "${toggle_key}" "${push_to_talk_key}"

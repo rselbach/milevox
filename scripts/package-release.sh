@@ -80,6 +80,8 @@ main() {
   install -m 0755 "${repo_dir}/uninstall.sh" "${stage_dir}/uninstall.sh"
   install -m 0755 "${repo_dir}/scripts/download-model.sh" \
     "${stage_dir}/scripts/download-model.sh"
+  install -m 0755 "${repo_dir}/scripts/setup-user.sh" \
+    "${stage_dir}/scripts/setup-user.sh"
   install -m 0644 "${repo_dir}/packaging/systemd/milevox.service" \
     "${repo_dir}/packaging/systemd/environment" \
     "${stage_dir}/packaging/systemd/"

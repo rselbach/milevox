@@ -26,8 +26,7 @@ then install the daemon and its runtime dependencies with:
 
 ```sh
 sudo pacman -U ./milevox-VERSION-1-ARCHITECTURE.pkg.tar.zst
-milevox-download-model
-systemctl --user enable --now milevox.service
+milevox-setup
 ```
 
 The Omarchy GUI is a separate package. Install and activate it for the current
@@ -37,6 +36,9 @@ user with:
 sudo pacman -U ./milevox-omarchy-VERSION-1-any.pkg.tar.zst
 milevox-omarchy install
 ```
+
+`milevox-omarchy install` also runs `milevox-setup`, so installing both
+packages only requires the GUI setup command.
 
 Release archives also include a per-user installer:
 

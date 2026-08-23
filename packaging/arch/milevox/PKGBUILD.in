@@ -35,6 +35,8 @@ package() {
     "${pkgdir}/usr/bin/milevox"
   install -Dm755 "${source_dir}/scripts/download-model.sh" \
     "${pkgdir}/usr/bin/milevox-download-model"
+  install -Dm755 "${source_dir}/scripts/setup-user.sh" \
+    "${pkgdir}/usr/bin/milevox-setup"
 
   install -Dm644 "${source_dir}/packaging/systemd/milevox.service" \
     "${pkgdir}/usr/lib/systemd/user/milevox.service"

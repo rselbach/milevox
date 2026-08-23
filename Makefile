@@ -14,11 +14,13 @@ check-guis: check-gui-shell validate-omarchy-gui
 
 check-shell:
 	bash -n install.sh uninstall.sh scripts/download-model.sh \
+		scripts/setup-user.sh \
 		scripts/package-arch-release.sh scripts/package-omarchy-release.sh \
 		scripts/package-release.sh \
 		guis/omarchy/milevox-omarchy
 	@if command -v shellcheck >/dev/null; then \
 		shellcheck install.sh uninstall.sh scripts/download-model.sh \
+			scripts/setup-user.sh \
 			scripts/package-arch-release.sh \
 			scripts/package-omarchy-release.sh scripts/package-release.sh \
 			guis/omarchy/milevox-omarchy; \

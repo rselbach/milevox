@@ -22,6 +22,9 @@ sudo pacman -U ./milevox-omarchy-VERSION-1-any.pkg.tar.zst
 milevox-omarchy install
 ```
 
+This command installs the speech model, enables and starts the Milevox user
+service, then installs the GUI and keybindings.
+
 To install from a source checkout instead, use the bundled installer.
 
 From the Milevox source checkout, run:
