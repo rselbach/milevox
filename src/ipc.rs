@@ -30,6 +30,7 @@ pub enum Command {
     Debug {
         enabled: bool,
     },
+    DebugLast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,6 +77,8 @@ pub struct StateEvent {
     pub level: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<SettingsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_entry: Option<String>,
 }
 
 impl StateEvent {
@@ -88,6 +91,7 @@ impl StateEvent {
             partial_transcript: None,
             level: None,
             settings: None,
+            debug_entry: None,
         }
     }
 
@@ -100,6 +104,7 @@ impl StateEvent {
             partial_transcript: None,
             level: None,
             settings: None,
+            debug_entry: None,
         }
     }
 
@@ -112,6 +117,7 @@ impl StateEvent {
             partial_transcript,
             level,
             settings: None,
+            debug_entry: None,
         }
     }
 
@@ -124,6 +130,7 @@ impl StateEvent {
             partial_transcript: None,
             level: None,
             settings: None,
+            debug_entry: None,
         }
     }
 
@@ -136,6 +143,7 @@ impl StateEvent {
             partial_transcript: None,
             level: None,
             settings: None,
+            debug_entry: None,
         }
     }
 
@@ -143,11 +151,17 @@ impl StateEvent {
         self.settings = Some(settings);
         self
     }
+
+    pub fn with_debug_entry(mut self, debug_entry: String) -> Self {
+        self.debug_entry = Some(debug_entry);
+        self
+    }
 }
 
 pub async fn run_client(command: Command) -> Result<()> {
     let follow = matches!(command, Command::Status { follow: true });
-    let print_response = command_prints_response(&command);
+    let print_json = command_prints_json(&command);
+    let print_debug_entry = matches!(command, Command::DebugLast);
     let path = paths::socket_path();
     let mut stream = UnixStream::connect(&path)
         .await
@@ -159,8 +173,10 @@ pub async fn run_client(command: Command) -> Result<()> {
 
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
-        if print_response {
+        if print_json {
             println!("{line}");
+        } else if print_debug_entry {
+            println!("{}", debug_entry_from_response(&line)?);
         } else {
             check_mutation_response(&line)?;
         }
@@ -176,7 +192,7 @@ pub async fn run_client(command: Command) -> Result<()> {
     bail!("Milevox closed the connection without a response")
 }
 
-fn command_prints_response(command: &Command) -> bool {
+fn command_prints_json(command: &Command) -> bool {
     matches!(command, Command::Status { .. })
         || matches!(
             command,
@@ -186,6 +202,23 @@ fn command_prints_response(command: &Command) -> bool {
                 model: None,
             }
         )
+}
+
+fn debug_entry_from_response(line: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct DebugResponse {
+        message: Option<String>,
+        debug_entry: Option<String>,
+    }
+
+    let response: DebugResponse =
+        serde_json::from_str(line).context("Milevox returned a malformed response")?;
+    if let Some(message) = response.message.filter(|message| !message.is_empty()) {
+        bail!(message);
+    }
+    response
+        .debug_entry
+        .context("Milevox returned no diagnostics for the last transcription")
 }
 
 fn check_mutation_response(line: &str) -> Result<()> {
@@ -285,6 +318,16 @@ mod tests {
     }
 
     #[test]
+    fn serializes_last_debug_request() {
+        let command = Command::DebugLast;
+
+        assert_eq!(
+            serde_json::to_string(&command).unwrap(),
+            r#"{"command":"debug_last"}"#
+        );
+    }
+
+    #[test]
     fn configuration_updates_clear_the_previous_transcript() {
         let event = StateEvent::configuration_changed();
 
@@ -295,19 +338,43 @@ mod tests {
     }
 
     #[test]
-    fn only_read_commands_print_json() {
-        assert!(command_prints_response(&Command::Status { follow: false }));
-        assert!(command_prints_response(&Command::Settings {
+    fn only_structured_read_commands_print_json() {
+        assert!(command_prints_json(&Command::Status { follow: false }));
+        assert!(command_prints_json(&Command::Settings {
             enabled: None,
             provider: None,
             model: None,
         }));
-        assert!(!command_prints_response(&Command::Debug { enabled: true }));
-        assert!(!command_prints_response(&Command::Settings {
+        assert!(!command_prints_json(&Command::DebugLast));
+        assert!(!command_prints_json(&Command::Debug { enabled: true }));
+        assert!(!command_prints_json(&Command::Settings {
             enabled: Some(true),
             provider: None,
             model: None,
         }));
+    }
+
+    #[test]
+    fn extracts_last_debug_entry() {
+        let entry = debug_entry_from_response(
+            r#"{"type":"state","state":"idle","debug_entry":"FINAL RAW:\nCool. Cool cool cool."}"#,
+        )
+        .unwrap();
+
+        assert_eq!(entry, "FINAL RAW:\nCool. Cool cool cool.");
+    }
+
+    #[test]
+    fn reports_when_no_last_debug_entry_exists() {
+        let error = debug_entry_from_response(
+            r#"{"type":"state","state":"idle","message":"No transcription diagnostics are available"}"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "No transcription diagnostics are available"
+        );
     }
 
     #[test]

@@ -48,7 +48,7 @@ enum CliCommand {
         #[command(subcommand)]
         command: SettingsCommand,
     },
-    /// Enable or disable transcript debug logging.
+    /// Inspect or configure transcript diagnostics.
     Debug {
         #[command(subcommand)]
         command: DebugCommand,
@@ -93,6 +93,8 @@ enum DebugCommand {
     Enable,
     /// Disable transcript debug logging.
     Disable,
+    /// Print diagnostics for the most recent transcription attempt.
+    Last,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -160,8 +162,12 @@ async fn main() -> Result<()> {
             run_client(command).await
         }
         CliCommand::Debug { command } => {
-            let enabled = matches!(command, DebugCommand::Enable);
-            run_client(Command::Debug { enabled }).await
+            let command = match command {
+                DebugCommand::Enable => Command::Debug { enabled: true },
+                DebugCommand::Disable => Command::Debug { enabled: false },
+                DebugCommand::Last => Command::DebugLast,
+            };
+            run_client(command).await
         }
     }
 }

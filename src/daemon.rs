@@ -36,7 +36,7 @@ enum ActorMessage {
     },
     Completed {
         generation: u64,
-        result: Result<PipelineResult>,
+        completion: PipelineCompletion,
     },
     Shutdown {
         reply: oneshot::Sender<()>,
@@ -48,9 +48,40 @@ struct PipelineResult {
     warning: Option<String>,
 }
 
+struct PipelineCompletion {
+    result: Result<PipelineResult>,
+    debug_entry: String,
+}
+
+#[derive(Default)]
+struct LastDebugEntry {
+    entry: Option<String>,
+}
+
+impl LastDebugEntry {
+    fn remember(&mut self, entry: String) {
+        self.entry = Some(entry);
+    }
+
+    fn event(&self, state: State) -> StateEvent {
+        let Some(entry) = &self.entry else {
+            return StateEvent::message(state, "No transcription diagnostics are available");
+        };
+
+        StateEvent::new(state).with_debug_entry(entry.clone())
+    }
+}
+
 struct PreviewTranscripts {
     raw: Option<String>,
     stabilized: Option<String>,
+}
+
+struct DebugOutcome<'a> {
+    provider_text: Option<&'a str>,
+    delivered_text: &'a str,
+    warning: Option<&'a str>,
+    error: Option<&'a str>,
 }
 
 struct Pipeline {
@@ -75,6 +106,7 @@ struct Daemon {
     generation: u64,
     raw_preview_transcript: Option<String>,
     partial_transcript: Option<String>,
+    last_debug_entry: LastDebugEntry,
     level: f32,
     events: watch::Sender<StateEvent>,
     inbox: mpsc::Sender<ActorMessage>,
@@ -109,6 +141,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         generation: 0,
         raw_preview_transcript: None,
         partial_transcript: None,
+        last_debug_entry: LastDebugEntry::default(),
         level: 0.0,
         events: events.clone(),
         inbox: inbox.clone(),
@@ -247,7 +280,10 @@ impl Daemon {
                         self.publish_recording();
                     }
                 }
-                ActorMessage::Completed { generation, result } => {
+                ActorMessage::Completed {
+                    generation,
+                    completion,
+                } => {
                     if self.pipeline.as_ref().map(|pipeline| pipeline.generation)
                         != Some(generation)
                     {
@@ -257,7 +293,8 @@ impl Daemon {
                     self.raw_preview_transcript = None;
                     self.partial_transcript = None;
                     self.level = 0.0;
-                    match result {
+                    self.last_debug_entry.remember(completion.debug_entry);
+                    match completion.result {
                         Ok(result) => {
                             self.publish(StateEvent::completed(result.transcript, result.warning));
                         }
@@ -293,7 +330,12 @@ impl Daemon {
             } => self.update_settings(enabled, provider, model),
             Command::SetToken { provider, token } => self.update_token(provider, token),
             Command::Debug { enabled } => self.update_debug(enabled),
+            Command::DebugLast => self.last_debug(),
         }
+    }
+
+    fn last_debug(&self) -> StateEvent {
+        self.decorate(self.last_debug_entry.event(self.current_state()))
     }
 
     fn update_settings(
@@ -430,10 +472,13 @@ impl Daemon {
         let audio = match active.recording.finish() {
             Ok(audio) => audio,
             Err(error) => {
+                let error = format!("{error:#}");
+                self.last_debug_entry
+                    .remember(failed_debug_entry(generation, &previews, &error));
                 self.raw_preview_transcript = None;
                 self.partial_transcript = None;
                 self.level = 0.0;
-                return self.publish(StateEvent::message(State::Error, format!("{error:#}")));
+                return self.publish(StateEvent::message(State::Error, error));
             }
         };
 
@@ -442,7 +487,7 @@ impl Daemon {
         let inbox = self.inbox.clone();
         let transcriber = self.transcriber.clone();
         let task = tokio::spawn(async move {
-            let result = run_pipeline(
+            let completion = run_pipeline(
                 generation,
                 audio,
                 previews,
@@ -453,7 +498,10 @@ impl Daemon {
             )
             .await;
             let _ = inbox
-                .send(ActorMessage::Completed { generation, result })
+                .send(ActorMessage::Completed {
+                    generation,
+                    completion,
+                })
                 .await;
         });
         self.pipeline = Some(Pipeline { generation, task });
@@ -706,17 +754,34 @@ async fn run_pipeline(
     credentials: Credentials,
     transcriber: transcription::ParakeetTranscriber,
     inbox: &mpsc::Sender<ActorMessage>,
-) -> Result<PipelineResult> {
-    let raw = transcriber.transcribe(audio).await?;
+) -> PipelineCompletion {
+    let raw = match transcriber.transcribe(audio).await {
+        Ok(raw) => raw,
+        Err(error) => {
+            let entry = failed_debug_entry(generation, &previews, &format!("{error:#}"));
+            persist_debug_entry(config.debug.enabled, &entry).await;
+            return PipelineCompletion {
+                result: Err(error),
+                debug_entry: entry,
+            };
+        }
+    };
 
-    if config.post_processing.enabled {
-        inbox
+    if config.post_processing.enabled
+        && let Err(error) = inbox
             .send(ActorMessage::Progress {
                 generation,
                 state: State::Refining,
             })
             .await
-            .context("Milevox daemon stopped during post-processing")?;
+            .context("Milevox daemon stopped during post-processing")
+    {
+        let entry = failed_debug_entry(generation, &previews, &format!("{error:#}"));
+        persist_debug_entry(config.debug.enabled, &entry).await;
+        return PipelineCompletion {
+            result: Err(error),
+            debug_entry: entry,
+        };
     }
     let api_key = credentials.resolve(&config.post_processing);
     let post_processing_input = if config.post_processing.enabled {
@@ -730,27 +795,30 @@ async fn run_pipeline(
         post_processing_input,
     )
     .await;
-    if config.debug.enabled {
-        let entry = debug_entry(
-            generation,
-            &previews,
-            &raw,
-            post_processing_input,
-            refined.provider_text.as_deref(),
-            &refined.text,
-            refined.warning.as_deref(),
-        );
-        let log_path = paths::debug_log_path();
-        if let Err(error) = append_debug_log(&log_path, &entry).await {
-            eprintln!("Milevox could not write debug log: {error:#}");
-        }
-    }
-    output::deliver(&config.output, &refined.text).await?;
-
-    Ok(PipelineResult {
+    let delivery = output::deliver(&config.output, &refined.text).await;
+    let delivery_error = delivery.as_ref().err().map(|error| format!("{error:#}"));
+    let entry = debug_entry(
+        generation,
+        &previews,
+        &raw,
+        post_processing_input,
+        DebugOutcome {
+            provider_text: refined.provider_text.as_deref(),
+            delivered_text: &refined.text,
+            warning: refined.warning.as_deref(),
+            error: delivery_error.as_deref(),
+        },
+    );
+    persist_debug_entry(config.debug.enabled, &entry).await;
+    let result = delivery.map(|()| PipelineResult {
         transcript: refined.text,
         warning: refined.warning,
-    })
+    });
+
+    PipelineCompletion {
+        result,
+        debug_entry: entry,
+    }
 }
 
 fn select_post_processing_input<'a>(
@@ -765,17 +833,43 @@ fn debug_entry(
     previews: &PreviewTranscripts,
     final_raw: &str,
     post_processing_input: &str,
-    provider_text: Option<&str>,
-    delivered_text: &str,
-    warning: Option<&str>,
+    outcome: DebugOutcome<'_>,
 ) -> String {
     let raw_preview = previews.raw.as_deref().unwrap_or("[unavailable]");
     let stabilized_preview = previews.stabilized.as_deref().unwrap_or("[unavailable]");
-    let provider_text = provider_text.unwrap_or("[unavailable]");
-    let warning = warning.unwrap_or("[none]");
+    let provider_text = outcome.provider_text.unwrap_or("[unavailable]");
+    let warning = outcome.warning.unwrap_or("[none]");
+    let error = outcome.error.unwrap_or("[none]");
+    let delivered_text = outcome.delivered_text;
     format!(
-        "=== RECORDING {generation} ===\nLAST RAW PREVIEW:\n{raw_preview}\n\nLAST STABILIZED PREVIEW:\n{stabilized_preview}\n\nFINAL RAW:\n{final_raw}\n\nPOST-PROCESSING INPUT:\n{post_processing_input}\n\nPROVIDER RESPONSE:\n{provider_text}\n\nDELIVERED TEXT:\n{delivered_text}\n\nWARNING:\n{warning}"
+        "=== RECORDING {generation} ===\nLAST RAW PREVIEW:\n{raw_preview}\n\nLAST STABILIZED PREVIEW:\n{stabilized_preview}\n\nFINAL RAW:\n{final_raw}\n\nPOST-PROCESSING INPUT:\n{post_processing_input}\n\nPROVIDER RESPONSE:\n{provider_text}\n\nDELIVERED TEXT:\n{delivered_text}\n\nWARNING:\n{warning}\n\nERROR:\n{error}"
     )
+}
+
+fn failed_debug_entry(generation: u64, previews: &PreviewTranscripts, error: &str) -> String {
+    debug_entry(
+        generation,
+        previews,
+        "[unavailable]",
+        "[unavailable]",
+        DebugOutcome {
+            provider_text: None,
+            delivered_text: "[unavailable]",
+            warning: None,
+            error: Some(error),
+        },
+    )
+}
+
+async fn persist_debug_entry(enabled: bool, entry: &str) {
+    if !enabled {
+        return;
+    }
+
+    let log_path = paths::debug_log_path();
+    if let Err(error) = append_debug_log(&log_path, entry).await {
+        eprintln!("Milevox could not write debug log: {error:#}");
+    }
 }
 
 async fn append_debug_log(path: &Path, entry: &str) -> Result<()> {
@@ -833,9 +927,12 @@ mod tests {
             &previews,
             "Troy and a bed in the morning",
             "Troy and Abed in the morning",
-            Some("Troy and Abed in the morning."),
-            "Troy and Abed in the morning.",
-            None,
+            DebugOutcome {
+                provider_text: Some("Troy and Abed in the morning."),
+                delivered_text: "Troy and Abed in the morning.",
+                warning: None,
+                error: None,
+            },
         );
 
         assert_eq!(
@@ -847,8 +944,46 @@ mod tests {
              POST-PROCESSING INPUT:\nTroy and Abed in the morning\n\n\
              PROVIDER RESPONSE:\nTroy and Abed in the morning.\n\n\
              DELIVERED TEXT:\nTroy and Abed in the morning.\n\n\
-             WARNING:\n[none]"
+             WARNING:\n[none]\n\n\
+             ERROR:\n[none]"
         );
+    }
+
+    #[test]
+    fn last_diagnostic_replaces_the_previous_entry() {
+        let mut last = LastDebugEntry::default();
+
+        assert_eq!(
+            last.event(State::Idle).message.as_deref(),
+            Some("No transcription diagnostics are available")
+        );
+        last.remember("Troy's transcription".to_owned());
+        last.remember("Abed's transcription".to_owned());
+
+        let event = last.event(State::Idle);
+        assert_eq!(event.debug_entry.as_deref(), Some("Abed's transcription"));
+        assert!(event.message.is_none());
+    }
+
+    #[test]
+    fn failed_transcription_replaces_stale_diagnostics() {
+        let previews = PreviewTranscripts {
+            raw: Some("Dean-a-ling".to_owned()),
+            stabilized: Some("Dean a ling".to_owned()),
+        };
+        let mut last = LastDebugEntry::default();
+        last.remember("previous transcription".to_owned());
+
+        last.remember(failed_debug_entry(
+            9,
+            &previews,
+            "Parakeet transcription failed",
+        ));
+
+        let entry = last.event(State::Error).debug_entry.unwrap();
+        assert!(entry.contains("LAST RAW PREVIEW:\nDean-a-ling"));
+        assert!(entry.contains("ERROR:\nParakeet transcription failed"));
+        assert!(!entry.contains("previous transcription"));
     }
 
     #[test]

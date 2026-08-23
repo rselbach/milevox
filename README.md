@@ -73,6 +73,17 @@ You can also specify a custom location for the local model:
 model_path = "/path/to/parakeet-tdt-model"
 ```
 
+The daemon always keeps diagnostics for the most recent transcription attempt
+in memory, even when persistent debug logging is disabled. Print it with:
+
+```sh
+milevox debug last
+```
+
+This entry is cleared when the daemon restarts. Use `milevox debug enable` to
+write diagnostics for every transcription to the persistent debug log, and
+`milevox debug disable` to stop persistent logging.
+
 Cloud post-processing is disabled by default. Enable OpenRouter with:
 
 ```toml
