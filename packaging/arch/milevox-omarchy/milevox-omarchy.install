@@ -1,0 +1,17 @@
+post_install() {
+  cat <<'EOF'
+
+==> Install the Milevox GUI for the current user:
+      milevox-omarchy install
+
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+
+==> Update the Milevox GUI files for the current user:
+      milevox-omarchy install
+
+EOF
+}

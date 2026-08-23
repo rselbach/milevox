@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+# Install or remove the packaged Milevox integration for Omarchy.
+
+set -euo pipefail
+
+fail() {
+  echo "milevox-omarchy: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: milevox-omarchy <command> [options]
+
+Commands:
+  install    Install or update the GUI and keybindings for this user
+  uninstall  Remove the GUI and keybindings for this user
+
+Options after "install" are passed to the GUI installer. Run
+"milevox-omarchy install --help" for details.
+EOF
+}
+
+main() {
+  local libexec_dir
+  local command_name="${1:-}"
+
+  libexec_dir="${MILEVOX_OMARCHY_LIBEXEC_DIR:-/usr/lib/milevox/omarchy}"
+
+  case "${command_name}" in
+    install)
+      shift
+      exec "${libexec_dir}/install.sh" "$@"
+      ;;
+    uninstall)
+      shift
+      exec "${libexec_dir}/uninstall.sh" "$@"
+      ;;
+    -h | --help)
+      usage
+      ;;
+    "")
+      usage >&2
+      return 2
+      ;;
+    *)
+      fail "unknown command: ${command_name}"
+      ;;
+  esac
+}
+
+main "$@"

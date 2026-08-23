@@ -1,0 +1,44 @@
+# Maintainer: Roberto Selbach <rselbach@rselbach.com>
+
+pkgname=milevox-omarchy
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Omarchy GUI and keybindings for Milevox"
+arch=('any')
+url="https://github.com/rselbach/milevox"
+license=('MIT')
+
+depends=(
+  "milevox=${pkgver}"
+  'hyprland'
+  'jq'
+  'omarchy'
+)
+
+options=('!debug')
+install=milevox-omarchy.install
+
+_archive="${pkgname}-${pkgver}.tar.gz"
+source=(
+  "${pkgname}-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/${_archive}"
+)
+sha256sums=('@SHA256@')
+
+package() {
+  local source_dir="${srcdir}/${pkgname}-${pkgver}"
+  local libexec_dir="${pkgdir}/usr/lib/milevox/omarchy"
+
+  install -Dm755 "${source_dir}/milevox-omarchy" \
+    "${pkgdir}/usr/bin/milevox-omarchy"
+  install -d "${libexec_dir}"
+  install -m755 "${source_dir}/install.sh" \
+    "${source_dir}/uninstall.sh" "${libexec_dir}/"
+  install -m644 "${source_dir}/manifest.json" \
+    "${source_dir}/Panel.qml" \
+    "${source_dir}/MilevoxOverlay.qml" "${libexec_dir}/"
+
+  install -Dm644 "${source_dir}/README.md" \
+    "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 "${source_dir}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

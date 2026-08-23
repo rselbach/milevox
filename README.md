@@ -18,6 +18,32 @@ This project is comprised of a core daemon and optional GUIs.
 - `curl` and GNU core utilities
 - A systemd user session when using the installer
 
+## Installation
+
+Each tagged GitHub release includes pacman packages for `x86_64` and
+`aarch64`. Download the package for your architecture from the release page,
+then install the daemon and its runtime dependencies with:
+
+```sh
+sudo pacman -U ./milevox-VERSION-1-ARCHITECTURE.pkg.tar.zst
+milevox-download-model
+systemctl --user enable --now milevox.service
+```
+
+The Omarchy GUI is a separate package. Install and activate it for the current
+user with:
+
+```sh
+sudo pacman -U ./milevox-omarchy-VERSION-1-any.pkg.tar.zst
+milevox-omarchy install
+```
+
+Release archives also include a per-user installer:
+
+```sh
+./install.sh
+```
+
 Milevox uses `parakeet-rs` and ONNX Runtime for local inference. It doesn't require a
 separate transcription executable.
 

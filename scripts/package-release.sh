@@ -84,12 +84,12 @@ main() {
     "${repo_dir}/packaging/systemd/environment" \
     "${stage_dir}/packaging/systemd/"
   install -m 0644 "${repo_dir}/README.md" "${repo_dir}/LICENSE" \
-    "${repo_dir}/CHANGELOG.md" "${stage_dir}/"
+    "${stage_dir}/"
 
   mkdir -p -- "${dist_dir}"
   rm -f -- "${archive_path}" "${checksum_path}"
   tar --create --gzip --file "${archive_path}" \
-    --owner 0 --group 0 --numeric-owner --mtime '@0' \
+    --sort=name --owner 0 --group 0 --numeric-owner --mtime '@0' \
     --directory "${stage_parent}" "$(basename -- "${stage_dir}")"
   (
     cd -- "${dist_dir}"

@@ -1,0 +1,50 @@
+# Maintainer: Roberto Selbach <rselbach@rselbach.com>
+
+pkgname=milevox
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Local speech-to-text CLI and daemon"
+arch=('@ARCH@')
+url="https://github.com/rselbach/milevox"
+license=('MIT')
+
+depends=(
+  'alsa-lib'
+  'curl'
+  'gcc-libs'
+  'glibc'
+  'libpipewire'
+  'pipewire-audio'
+  'wl-clipboard'
+  'wtype'
+)
+
+options=('!debug' '!strip')
+install=milevox.install
+
+_archive="milevox-linux-@ARCH@.tar.gz"
+source=(
+  "${pkgname}-${pkgver}-@ARCH@.tar.gz::${url}/releases/download/v${pkgver}/${_archive}"
+)
+sha256sums=('@SHA256@')
+
+package() {
+  local source_dir="${srcdir}/milevox-linux-@ARCH@"
+
+  install -Dm755 "${source_dir}/bin/milevox" \
+    "${pkgdir}/usr/bin/milevox"
+  install -Dm755 "${source_dir}/scripts/download-model.sh" \
+    "${pkgdir}/usr/bin/milevox-download-model"
+
+  install -Dm644 "${source_dir}/packaging/systemd/milevox.service" \
+    "${pkgdir}/usr/lib/systemd/user/milevox.service"
+  sed -i 's|%h/.local/bin/milevox|/usr/bin/milevox|' \
+    "${pkgdir}/usr/lib/systemd/user/milevox.service"
+
+  install -Dm644 "${source_dir}/packaging/systemd/environment" \
+    "${pkgdir}/usr/share/doc/${pkgname}/environment.example"
+  install -Dm644 "${source_dir}/README.md" \
+    "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 "${source_dir}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

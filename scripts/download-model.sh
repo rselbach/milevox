@@ -5,8 +5,9 @@
 set -euo pipefail
 
 readonly MODEL_NAME="parakeet-tdt-0.6b-v2-int8"
+readonly MODEL_REVISION="0bbb45a3365852604aef28b538a8f066f4ccaa85"
 readonly MODEL_URL="https://huggingface.co/istupakov/\
-parakeet-tdt-0.6b-v2-onnx/resolve/main"
+parakeet-tdt-0.6b-v2-onnx/resolve/${MODEL_REVISION}"
 readonly ENCODER_SHA256="3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155"
 readonly DECODER_SHA256="a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3"
 readonly VOCAB_SHA256="ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
@@ -45,19 +46,36 @@ download_file() {
     return
   fi
 
-  rm -f -- "${partial}"
-
   echo "Downloading ${filename}"
-  curl \
+  if ! curl \
     --continue-at - \
     --fail \
     --location \
     --retry 3 \
     --output "${partial}" \
-    "${MODEL_URL}/${filename}"
+    "${MODEL_URL}/${filename}"; then
+    echo "Resume failed; downloading ${filename} from the beginning"
+    rm -f -- "${partial}"
+    curl \
+      --fail \
+      --location \
+      --retry 3 \
+      --output "${partial}" \
+      "${MODEL_URL}/${filename}"
+  fi
 
-  file_has_checksum "${partial}" "${checksum}" ||
-    fail "downloaded ${filename} failed its SHA-256 check"
+  if ! file_has_checksum "${partial}" "${checksum}"; then
+    echo "Checksum failed; downloading ${filename} from the beginning"
+    rm -f -- "${partial}"
+    curl \
+      --fail \
+      --location \
+      --retry 3 \
+      --output "${partial}" \
+      "${MODEL_URL}/${filename}"
+    file_has_checksum "${partial}" "${checksum}" ||
+      fail "downloaded ${filename} failed its SHA-256 check"
+  fi
   mv -- "${partial}" "${destination}"
 }
 

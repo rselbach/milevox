@@ -1,0 +1,22 @@
+post_install() {
+  cat <<'EOF'
+
+==> Milevox installation
+
+    Install the speech model for each user:
+      milevox-download-model
+
+    Then enable the user service:
+      systemctl --user enable --now milevox.service
+
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+
+==> Restart Milevox to use the upgraded binary:
+      systemctl --user restart milevox.service
+
+EOF
+}

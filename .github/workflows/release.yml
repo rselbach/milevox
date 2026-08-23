@@ -28,6 +28,7 @@ jobs:
           sudo apt-get install --yes \
             libasound2-dev \
             libpipewire-0.3-dev \
+            libssl-dev \
             pkg-config
       - name: Install Rust 1.98
         run: |
@@ -35,23 +36,91 @@ jobs:
           rustup default 1.98.0
       - name: Build release archive
         run: ./scripts/package-release.sh
+      - name: Build Omarchy release archive
+        if: runner.arch == 'X64'
+        run: ./scripts/package-omarchy-release.sh
+      - name: Verify release archives
+        run: |
+          cd dist
+          sha256sum --check ./*.sha256
+          archive="milevox-linux-$(uname -m).tar.gz"
+          binary="${RUNNER_TEMP}/milevox"
+          tar --extract --gzip --to-stdout --file "${archive}" \
+            "milevox-linux-$(uname -m)/bin/milevox" > "${binary}"
+          chmod +x "${binary}"
+          "${binary}" --version
       - uses: actions/upload-artifact@v4
         with:
-          name: release-${{ runner.arch }}
+          name: raw-release-${{ runner.arch }}
           path: dist/*
           if-no-files-found: error
 
-  publish:
+  package:
     needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: raw-release-*
+          path: dist
+          merge-multiple: true
+      - name: Build pacman packages
+        run: |
+          host_uid="$(id -u)"
+          docker run --rm \
+            --env "HOST_UID=${host_uid}" \
+            --volume "${PWD}:/workspace" \
+            --workdir /workspace \
+            archlinux:base-devel \
+            bash -lc '
+              set -euo pipefail
+              builder="$(
+                getent passwd "${HOST_UID}" | cut -d: -f1 || true
+              )"
+              if [[ -z "${builder}" ]]; then
+                builder=builder
+                useradd --uid "${HOST_UID}" --create-home "${builder}"
+              fi
+              runuser -u "${builder}" -- ./scripts/package-arch-release.sh \
+                milevox dist/milevox-linux-x86_64.tar.gz
+              runuser -u "${builder}" -- ./scripts/package-arch-release.sh \
+                milevox dist/milevox-linux-aarch64.tar.gz
+              omarchy_archive="$(find dist -maxdepth 1 -type f \
+                -name "milevox-omarchy-*.tar.gz" -print -quit)"
+              runuser -u "${builder}" -- ./scripts/package-arch-release.sh \
+                milevox-omarchy "${omarchy_archive}"
+            '
+      - name: Checksum pacman packages
+        run: |
+          for package in dist/*.pkg.tar.zst; do
+            package_name="$(basename -- "${package}")"
+            (
+              cd dist
+              sha256sum -- "${package_name}" >"${package_name}.sha256"
+            )
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacman-packages
+          path: dist/*.pkg.tar.zst*
+          if-no-files-found: error
+
+  publish:
+    needs: [build, package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-*
+          pattern: raw-release-*
           path: release-assets
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacman-packages
+          path: release-assets
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

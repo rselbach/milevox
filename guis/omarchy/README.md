@@ -13,6 +13,17 @@ and daemon.
 
 ## Install
 
+Tagged GitHub releases include an architecture-independent pacman package.
+Download it from the release page, then install and activate it for the current
+user:
+
+```sh
+sudo pacman -U ./milevox-omarchy-VERSION-1-any.pkg.tar.zst
+milevox-omarchy install
+```
+
+To install from a source checkout instead, use the bundled installer.
+
 From the Milevox source checkout, run:
 
 ```sh
@@ -46,6 +57,16 @@ transcript, then briefly shows the final text. Left-click the microphone icon
 to open settings. Right-click it to toggle recording.
 
 ## Remove
+
+For a package installation, remove the user configuration before uninstalling
+the package:
+
+```sh
+milevox-omarchy uninstall
+sudo pacman -R milevox-omarchy
+```
+
+From a source checkout, run:
 
 ```sh
 ./guis/omarchy/uninstall.sh
