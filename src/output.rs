@@ -191,10 +191,20 @@ struct HyprlandTargetResolver<'a> {
 
 impl TargetResolver for HyprlandTargetResolver<'_> {
     async fn active_target(&self) -> Result<Option<String>> {
+        let mut environment = self.environment.to_vec();
+        if !has_nonempty_environment_value(&environment, "HYPRLAND_INSTANCE_SIGNATURE") {
+            let (signature, wayland_display) = self.single_instance().await?;
+            environment.push(("HYPRLAND_INSTANCE_SIGNATURE".into(), signature.into()));
+            if !has_nonempty_environment_value(&environment, "WAYLAND_DISPLAY")
+                && let Some(wayland_display) = wayland_display
+            {
+                environment.push(("WAYLAND_DISPLAY".into(), wayland_display.into()));
+            }
+        }
         let output = run_capturing_output(
             self.program,
             &[OsStr::new("-j"), OsStr::new("activewindow")],
-            self.environment,
+            &environment,
             self.timeout,
             TARGET_RESPONSE_MAX_BYTES,
         )
@@ -212,6 +222,58 @@ impl TargetResolver for HyprlandTargetResolver<'_> {
             .filter(|address| !address.is_empty() && *address != "0x0")
             .map(str::to_owned))
     }
+}
+
+impl HyprlandTargetResolver<'_> {
+    async fn single_instance(&self) -> Result<(String, Option<String>)> {
+        let output = run_capturing_output(
+            self.program,
+            &[OsStr::new("instances"), OsStr::new("-j")],
+            self.environment,
+            self.timeout,
+            TARGET_RESPONSE_MAX_BYTES,
+        )
+        .await
+        .context("failed to discover the active Hyprland instance")?;
+        if !output.status.success() {
+            bail!(
+                "hyprctl instances exited with {}: {}",
+                output.status,
+                output.stderr
+            );
+        }
+        let response: Value = serde_json::from_slice(&output.stdout)
+            .context("hyprctl returned malformed instance data")?;
+        let instances = response
+            .as_array()
+            .context("hyprctl returned invalid instance data")?;
+        if instances.len() != 1 {
+            bail!(
+                "hyprctl reported {} instances; cannot select one safely",
+                instances.len()
+            );
+        }
+        let instance = &instances[0];
+        let signature = instance
+            .get("instance")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|signature| !signature.is_empty())
+            .context("hyprctl returned an instance without a signature")?;
+        let wayland_display = instance
+            .get("wl_socket")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|display| !display.is_empty())
+            .map(str::to_owned);
+        Ok((signature.to_owned(), wayland_display))
+    }
+}
+
+fn has_nonempty_environment_value(environment: &[(OsString, OsString)], name: &str) -> bool {
+    environment
+        .iter()
+        .any(|(key, value)| key == OsStr::new(name) && !value.is_empty())
 }
 
 async fn verify_target<R: TargetResolver>(
@@ -241,9 +303,16 @@ async fn type_text(
     if text.chars().any(char::is_control) {
         bail!("transcript contains a control character that cannot be typed safely");
     }
-    let output = run_with_stdin(program, &[OsStr::new("-")], text, environment, timeout)
-        .await
-        .context("wtype failed")?;
+    let output = run_with_stdin(
+        program,
+        &[OsStr::new("-")],
+        text,
+        environment,
+        timeout,
+        SuccessfulStderr::WaitForEof,
+    )
+    .await
+    .context("wtype failed")?;
     if output.status.success() {
         return Ok(());
     }
@@ -256,9 +325,16 @@ async fn copy_to_clipboard(
     environment: &[(OsString, OsString)],
     timeout: Duration,
 ) -> Result<()> {
-    let output = run_with_stdin(program, &[], text, environment, timeout)
-        .await
-        .context("wl-copy failed")?;
+    let output = run_with_stdin(
+        program,
+        &[],
+        text,
+        environment,
+        timeout,
+        SuccessfulStderr::Detach,
+    )
+    .await
+    .context("wl-copy failed")?;
     if output.status.success() {
         return Ok(());
     }
@@ -268,6 +344,13 @@ async fn copy_to_clipboard(
 struct ChildOutput {
     status: ExitStatus,
     stderr: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuccessfulStderr {
+    WaitForEof,
+    // wl-copy forks a clipboard server that intentionally retains stderr.
+    Detach,
 }
 
 struct CapturedOutput {
@@ -348,6 +431,7 @@ async fn run_with_stdin(
     input: &str,
     environment: &[(OsString, OsString)],
     timeout: Duration,
+    successful_stderr: SuccessfulStderr,
 ) -> Result<ChildOutput> {
     let mut command = reviewed_command(program, environment);
     let mut child = command
@@ -373,10 +457,21 @@ async fn run_with_stdin(
             .wait()
             .await
             .with_context(|| format!("failed to wait for {}", program.to_string_lossy()))?;
-        let stderr = (&mut stderr_reader)
-            .await
-            .context("child stderr reader stopped unexpectedly")?
-            .context("failed to read child stderr")?;
+        let stderr = if status.success() && successful_stderr == SuccessfulStderr::Detach {
+            stderr_reader.abort();
+            match (&mut stderr_reader).await {
+                Ok(stderr) => stderr.context("failed to read child stderr")?,
+                Err(error) if error.is_cancelled() => Vec::new(),
+                Err(error) => {
+                    return Err(error).context("child stderr reader stopped unexpectedly");
+                }
+            }
+        } else {
+            (&mut stderr_reader)
+                .await
+                .context("child stderr reader stopped unexpectedly")?
+                .context("failed to read child stderr")?
+        };
         Ok::<_, anyhow::Error>(ChildOutput {
             status,
             stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
@@ -745,6 +840,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hyprland_resolver_discovers_the_only_local_instance() {
+        let directory = test_directory("hyprland-discovery");
+        let hyprctl = fake_program(
+            &directory,
+            "hyprctl",
+            r#"printf '%s\n' "$*" >> "${0}.args"
+if [[ "$*" == "instances -j" ]]; then
+  printf '%s' '[{"instance":"greendale-instance","wl_socket":"wayland-greendale"}]'
+elif [[ "${HYPRLAND_INSTANCE_SIGNATURE:-}" == "greendale-instance" && "${WAYLAND_DISPLAY:-}" == "wayland-greendale" ]]; then
+  printf '%s' '{"address":"0xdecaf"}'
+else
+  printf 'missing discovered environment\n' >&2
+  exit 23
+fi"#,
+        );
+        let environment = test_environment(&directory)
+            .into_iter()
+            .filter(|(key, _)| {
+                key != OsStr::new("HYPRLAND_INSTANCE_SIGNATURE")
+                    && key != OsStr::new("WAYLAND_DISPLAY")
+            })
+            .collect::<Vec<_>>();
+        let resolver = HyprlandTargetResolver {
+            program: hyprctl.as_os_str(),
+            environment: &environment,
+            timeout: Duration::from_secs(1),
+        };
+
+        assert_eq!(
+            resolver.active_target().await.unwrap().as_deref(),
+            Some("0xdecaf")
+        );
+        assert_eq!(
+            fs::read_to_string(hyprctl.with_extension("args")).unwrap(),
+            "instances -j\n-j activewindow\n"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_resolver_refuses_to_guess_between_instances() {
+        let directory = test_directory("hyprland-ambiguous");
+        let hyprctl = fake_program(
+            &directory,
+            "hyprctl",
+            r#"printf '%s\n' "$*" >> "$0.args"
+printf '%s' '[{"instance":"greendale-one"},{"instance":"greendale-two"}]'"#,
+        );
+        let resolver = HyprlandTargetResolver {
+            program: hyprctl.as_os_str(),
+            environment: &[],
+            timeout: Duration::from_secs(1),
+        };
+
+        let error = resolver.active_target().await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("2 instances"));
+        assert_eq!(
+            fs::read_to_string(hyprctl.with_extension("args")).unwrap(),
+            "instances -j\n"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn wl_copy_reports_stderr_and_receives_stdin() {
         let directory = test_directory("clipboard-stderr");
         let program = fake_program(
@@ -767,6 +927,48 @@ mod tests {
             fs::read_to_string(program.with_extension("stdin")).unwrap(),
             "Troy and Abed"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wl_copy_accepts_a_successful_daemonized_clipboard_server() {
+        let directory = test_directory("clipboard-daemon");
+        let program = fake_program(
+            &directory,
+            "wl-copy",
+            "cat > \"${0}.stdin\"\nsleep 30 &\nprintf '%s' \"$!\" > \"${0}.descendant\"\nexit 0",
+        );
+        let started = std::time::Instant::now();
+
+        copy_to_clipboard(
+            program.as_os_str(),
+            "Troy and Abed",
+            &test_environment(&directory),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            fs::read_to_string(program.with_extension("stdin")).unwrap(),
+            "Troy and Abed"
+        );
+        let descendant_pid = fs::read_to_string(program.with_extension("descendant"))
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        // SAFETY: the test owns the recorded descendant process.
+        assert_eq!(unsafe { libc::kill(descendant_pid, libc::SIGKILL) }, 0);
+        for _ in 0..100 {
+            // SAFETY: signal 0 only checks whether the recorded process still exists.
+            if unsafe { libc::kill(descendant_pid, 0) } == -1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // SAFETY: signal 0 only checks whether the recorded process still exists.
+        assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, -1);
         fs::remove_dir_all(directory).unwrap();
     }
 
