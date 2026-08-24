@@ -26,6 +26,8 @@ jobs:
             pkg-config \
             shellcheck
       - name: Complete CI check
+        env:
+          MILEVOX_SYSTEMD_SCOPE: system
         run: make check-core-ci
 
   gui:
