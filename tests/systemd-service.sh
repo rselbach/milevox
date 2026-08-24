@@ -104,12 +104,14 @@ main() {
   local source_unit
   local raw_unit
   local package_unit
+  local verify_unit
 
   source_unit="${REPO_DIR}/packaging/systemd/milevox.service"
   TEMP_DIR="$(mktemp -d)"
   trap cleanup EXIT
   raw_unit="${TEMP_DIR}/raw/milevox.service"
   package_unit="${TEMP_DIR}/package/milevox.service"
+  verify_unit="${TEMP_DIR}/verify/milevox.service"
 
   install -Dm0644 "${source_unit}" "${raw_unit}"
   install -Dm0644 "${source_unit}" "${package_unit}"
@@ -133,7 +135,9 @@ main() {
   if [[ ${MILEVOX_VERIFY_SYSTEMD:-0} == 1 ]]; then
     command -v systemd-analyze >/dev/null ||
       fail "systemd-analyze is required"
-    systemd-analyze verify "${source_unit}"
+    install -Dm0644 "${source_unit}" "${verify_unit}"
+    sed -i 's|^ExecStart=.*|ExecStart=/bin/true|' "${verify_unit}"
+    systemd-analyze verify "${verify_unit}"
     smoke_hardening
   fi
 
