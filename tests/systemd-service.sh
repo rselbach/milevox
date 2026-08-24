@@ -48,6 +48,7 @@ smoke_hardening() {
   local coverage_entry
   local coverage_tests
   local file
+  local run_command
   local test_name
   local unit
   local properties=(
@@ -65,13 +66,30 @@ smoke_hardening() {
     '--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6'
   )
 
-  if ! command -v systemd-run >/dev/null ||
-    ! systemctl --user show-environment >/dev/null 2>&1; then
-    [[ ${MILEVOX_REQUIRE_SYSTEMD_SMOKE:-0} != 1 ]] ||
-      fail "a systemd user manager is required for the hardening smoke test"
-    echo "Skipping systemd behavior smoke: no user manager is available."
-    return
-  fi
+  case "${MILEVOX_SYSTEMD_SCOPE:-user}" in
+    system)
+      command -v sudo >/dev/null ||
+        fail "sudo is required for the system-manager hardening smoke test"
+      run_command=(
+        sudo --non-interactive systemd-run
+        --uid="$(id -u)"
+        --gid="$(id -g)"
+      )
+      ;;
+    user)
+      if ! command -v systemd-run >/dev/null ||
+        ! systemctl --user show-environment >/dev/null 2>&1; then
+        [[ ${MILEVOX_REQUIRE_SYSTEMD_SMOKE:-0} != 1 ]] ||
+          fail "a systemd user manager is required for the hardening smoke test"
+        echo "Skipping systemd behavior smoke: no user manager is available."
+        return
+      fi
+      run_command=(systemd-run --user)
+      ;;
+    *)
+      fail "unknown systemd smoke scope: ${MILEVOX_SYSTEMD_SCOPE}"
+      ;;
+  esac
   command -v cargo >/dev/null || fail "cargo is required for the systemd smoke test"
   cargo="$(command -v cargo)"
   unit="milevox-hardening-test-$$"
@@ -93,7 +111,7 @@ smoke_hardening() {
 
   # Run the real module paths, including the fake local model and loopback cloud
   # fixtures, under the same restrictions as the installed service.
-  systemd-run --user --wait --collect --pipe --quiet --unit="${unit}" \
+  "${run_command[@]}" --wait --collect --pipe --quiet --unit="${unit}" \
     --working-directory="${REPO_DIR}" \
     "${properties[@]}" \
     --setenv="PATH=$(dirname -- "${cargo}"):/usr/local/bin:/usr/bin:/bin" \
