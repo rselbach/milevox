@@ -3,6 +3,8 @@
 # Build a pacman package from a Milevox release archive.
 
 set -euo pipefail
+# shellcheck source=scripts/lib-release.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib-release.sh"
 
 TEMP_DIR=""
 
@@ -34,20 +36,6 @@ render_pkgbuild() {
     -e "s/@ARCH@/${architecture}/g" \
     -e "s/@SHA256@/${checksum}/g" \
     "${template}" >"${destination}"
-}
-
-normalize_architecture() {
-  case "$1" in
-    aarch64 | arm64)
-      echo "aarch64"
-      ;;
-    x86_64 | amd64)
-      echo "x86_64"
-      ;;
-    *)
-      fail "unsupported build architecture: $1"
-      ;;
-  esac
 }
 
 main() {
@@ -82,11 +70,7 @@ main() {
   archive_path="$(realpath -- "${archive_argument}")"
   [[ -f "${archive_path}" ]] || fail "archive not found: ${archive_path}"
   archive_name="$(basename -- "${archive_path}")"
-  version="$(
-    awk -F '"' '/^version = / { print $2; exit }' \
-      "${repo_dir}/Cargo.toml"
-  )"
-  [[ -n "${version}" ]] || fail "could not read the Cargo package version"
+  version="$(project_version "${repo_dir}")" || fail "invalid project version"
   checksum="$(sha256sum -- "${archive_path}")"
   checksum="${checksum%% *}"
 

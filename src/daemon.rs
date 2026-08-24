@@ -1,20 +1,31 @@
-use std::fs::OpenOptions;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use anyhow::{Context, Result, bail};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::audio::{CapturedAudio, Recording, RecordingReader};
 use crate::config::{Config, PostProcessingProvider};
 use crate::credentials::Credentials;
 use crate::ipc::{
-    Command, DebugSettings, PostProcessingSettings, SettingsSnapshot, State, StateEvent,
-    ensure_socket_available,
+    CatalogOption, Command, DebugSettings, DeliveryMethod, Notice, PostProcessingSettings,
+    SettingsSnapshot, State, StateEvent, ensure_socket_available,
 };
-use crate::{output, paths, post_processing, transcription};
+use crate::{output, paths, post_processing, private_file, transcription};
+
+const MAX_IPC_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_CLIENTS: usize = 16;
+const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(500);
+const PREVIEW_OVERLAP_SECONDS: usize = 1;
+const DEBUG_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 enum ActorMessage {
     Command {
@@ -34,6 +45,10 @@ enum ActorMessage {
         generation: u64,
         level: f32,
     },
+    CaptureFailed {
+        generation: u64,
+        error: String,
+    },
     Completed {
         generation: u64,
         completion: PipelineCompletion,
@@ -45,7 +60,8 @@ enum ActorMessage {
 
 struct PipelineResult {
     transcript: String,
-    warning: Option<String>,
+    delivery: DeliveryMethod,
+    notices: Vec<Notice>,
 }
 
 struct PipelineCompletion {
@@ -111,18 +127,21 @@ struct Daemon {
     events: watch::Sender<StateEvent>,
     inbox: mpsc::Sender<ActorMessage>,
     transcriber: transcription::ParakeetTranscriber,
+    completion_waiters: Vec<oneshot::Sender<StateEvent>>,
 }
 
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
-    let runtime_dir = paths::runtime_dir();
-    tokio::fs::create_dir_all(&runtime_dir)
-        .await
-        .with_context(|| format!("failed to create {}", runtime_dir.display()))?;
+    paths::prepare_runtime_dir()?;
     ensure_socket_available().await?;
     let socket_path = paths::socket_path();
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to listen at {}", socket_path.display()))?;
-    reset_debug_log(&paths::debug_log_path())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to secure {}", socket_path.display()))?;
+    }
 
     let credentials_path = paths::credentials_path(&config_path);
     let credentials = Credentials::load(&credentials_path)?;
@@ -145,6 +164,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         level: 0.0,
         events: events.clone(),
         inbox: inbox.clone(),
+        completion_waiters: Vec::new(),
     };
     let actor = tokio::spawn(daemon.run(receiver));
 
@@ -172,23 +192,50 @@ async fn serve(
     inbox: mpsc::Sender<ActorMessage>,
     events: watch::Sender<StateEvent>,
 ) -> Result<()> {
+    let clients = std::sync::Arc::new(Semaphore::new(MAX_CLIENTS));
     loop {
         tokio::select! {
             result = listener.accept() => {
                 let (stream, _) = result.context("failed to accept a Milevox client")?;
+                let Ok(permit) = clients.clone().try_acquire_owned() else {
+                    eprintln!("Milevox rejected a client because the connection limit was reached");
+                    continue;
+                };
                 let inbox = inbox.clone();
                 let events = events.subscribe();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(error) = handle_client(stream, inbox, events).await {
                         eprintln!("Milevox client error: {error:#}");
                     }
                 });
             }
-            result = tokio::signal::ctrl_c() => {
-                result.context("failed to listen for shutdown signal")?;
+            result = shutdown_signal() => {
+                result?;
                 return Ok(());
             }
         }
+    }
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt =
+            signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?;
+        let mut terminate =
+            signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?;
+        tokio::select! {
+            _ = interrupt.recv() => Ok(()),
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to listen for shutdown signal")
     }
 }
 
@@ -197,10 +244,12 @@ async fn handle_client(
     inbox: mpsc::Sender<ActorMessage>,
     mut events: watch::Receiver<StateEvent>,
 ) -> Result<()> {
+    verify_peer(&stream)?;
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let line = lines.next_line().await?.context("client sent no command")?;
-    let command: Command = serde_json::from_str(&line).context("invalid client command")?;
+    let line = tokio::time::timeout(CLIENT_READ_TIMEOUT, read_request(reader))
+        .await
+        .context("client request timed out")??;
+    let command: Command = serde_json::from_slice(&line).context("invalid client command")?;
 
     if matches!(command, Command::Status { follow: true }) {
         let initial = events.borrow().clone();
@@ -226,8 +275,68 @@ async fn write_event(
     event: &StateEvent,
 ) -> Result<()> {
     let line = serde_json::to_vec(event)?;
-    writer.write_all(&line).await?;
-    writer.write_all(b"\n").await?;
+    tokio::time::timeout(CLIENT_WRITE_TIMEOUT, async {
+        writer.write_all(&line).await?;
+        writer.write_all(b"\n").await
+    })
+    .await
+    .context("client write timed out")??;
+    Ok(())
+}
+
+async fn read_request(mut reader: tokio::net::unix::OwnedReadHalf) -> Result<Vec<u8>> {
+    let mut request = Vec::with_capacity(1024);
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            bail!("client sent no complete command");
+        }
+        if let Some(newline) = buffer[..count].iter().position(|byte| *byte == b'\n') {
+            if request.len() + newline > MAX_IPC_REQUEST_BYTES {
+                bail!("client command exceeds {MAX_IPC_REQUEST_BYTES} bytes");
+            }
+            request.extend_from_slice(&buffer[..newline]);
+            return Ok(request);
+        }
+        if request.len() + count > MAX_IPC_REQUEST_BYTES {
+            bail!("client command exceeds {MAX_IPC_REQUEST_BYTES} bytes");
+        }
+        request.extend_from_slice(&buffer[..count]);
+    }
+}
+
+fn verify_peer(stream: &UnixStream) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut credentials = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `credentials` and `length` point to valid writable storage for SO_PEERCRED.
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&raw mut credentials).cast(),
+                &raw mut length,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).context("failed to inspect client UID");
+        }
+        verify_peer_uid(credentials.uid)?;
+    }
+    Ok(())
+}
+
+fn verify_peer_uid(uid: u32) -> Result<()> {
+    if uid != paths::current_uid() {
+        bail!("rejected Milevox client owned by another user");
+    }
     Ok(())
 }
 
@@ -236,8 +345,17 @@ impl Daemon {
         while let Some(message) = receiver.recv().await {
             match message {
                 ActorMessage::Command { command, reply } => {
-                    let event = self.handle_command(command).await;
-                    let _ = reply.send(event);
+                    if matches!(&command, Command::StopAndWait) {
+                        let event = self.stop_recording();
+                        if self.pipeline.is_some() {
+                            self.completion_waiters.push(reply);
+                        } else {
+                            let _ = reply.send(event);
+                        }
+                    } else {
+                        let event = self.handle_command(command).await;
+                        let _ = reply.send(event);
+                    }
                 }
                 ActorMessage::Progress { generation, state } => {
                     if self.pipeline.as_ref().map(|pipeline| pipeline.generation)
@@ -280,6 +398,9 @@ impl Daemon {
                         self.publish_recording();
                     }
                 }
+                ActorMessage::CaptureFailed { generation, error } => {
+                    self.capture_failed(generation, error);
+                }
                 ActorMessage::Completed {
                     generation,
                     completion,
@@ -294,14 +415,19 @@ impl Daemon {
                     self.partial_transcript = None;
                     self.level = 0.0;
                     self.last_debug_entry.remember(completion.debug_entry);
-                    match completion.result {
-                        Ok(result) => {
-                            self.publish(StateEvent::completed(result.transcript, result.warning));
-                        }
-                        Err(error) => {
-                            self.publish(StateEvent::message(State::Error, format!("{error:#}")));
-                        }
-                    }
+                    let event = match completion.result {
+                        Ok(result) => self.publish(StateEvent::completed(
+                            result.transcript,
+                            result.delivery,
+                            result.notices,
+                        )),
+                        Err(error) => self.publish(StateEvent::error(
+                            State::Error,
+                            "pipeline_failed",
+                            format!("{error:#}"),
+                        )),
+                    };
+                    self.resolve_completion_waiters(event);
                 }
                 ActorMessage::Shutdown { reply } => {
                     self.cancel().await;
@@ -316,10 +442,11 @@ impl Daemon {
         match command {
             Command::Start => self.start_recording(),
             Command::Stop => self.stop_recording(),
+            Command::StopAndWait => self.current_event(),
             Command::Toggle => match self.current_state() {
                 State::Recording => self.stop_recording(),
                 State::Idle | State::Error => self.start_recording(),
-                _ => self.current_event(),
+                State::Transcribing | State::Refining => self.cancel().await,
             },
             Command::Cancel => self.cancel().await,
             Command::Status { .. } => self.current_event(),
@@ -328,9 +455,20 @@ impl Daemon {
                 provider,
                 model,
             } => self.update_settings(enabled, provider, model),
+            Command::SettingsModels { provider } => {
+                let mut config = self.config.clone();
+                if let Some(provider) = provider {
+                    config.post_processing.provider = provider;
+                    config.post_processing.model = None;
+                }
+                StateEvent::new(self.current_state())
+                    .with_settings(settings_snapshot(&config, &self.credentials))
+            }
             Command::SetToken { provider, token } => self.update_token(provider, token),
+            Command::RemoveToken { provider } => self.remove_token(provider),
             Command::Debug { enabled } => self.update_debug(enabled),
             Command::DebugLast => self.last_debug(),
+            Command::DebugClear => self.clear_debug(),
         }
     }
 
@@ -348,29 +486,51 @@ impl Daemon {
             return self.current_event();
         }
         if self.recording.is_some() || self.pipeline.is_some() {
-            return self.decorate(StateEvent::message(
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "settings_busy",
                 "Post-processing settings cannot change during dictation",
             ));
         }
 
-        let updated = match apply_settings(&self.config, enabled, provider, model) {
+        let latest = match Config::load(&self.config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                return self.decorate(StateEvent::error(
+                    self.current_state(),
+                    "config_reload_failed",
+                    format!("Could not reload post-processing settings: {error:#}"),
+                ));
+            }
+        };
+        let model_value = model.clone();
+        let provider_changed =
+            provider.is_some_and(|provider| provider != latest.post_processing.provider);
+        let updated = match apply_settings(&latest, enabled, provider, model) {
             Ok(updated) => updated,
             Err(error) => {
-                return self.decorate(StateEvent::message(
+                return self.decorate(StateEvent::error(
                     self.current_state(),
+                    "invalid_settings",
                     format!("Invalid post-processing settings: {error:#}"),
                 ));
             }
         };
-        if let Err(error) = updated.save(&self.config_path) {
-            return self.decorate(StateEvent::message(
+        if let Err(error) = updated.save_post_processing(
+            &self.config_path,
+            enabled,
+            provider,
+            model_value.as_deref(),
+            provider_changed && model_value.is_none(),
+        ) {
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "settings_save_failed",
                 format!("Could not save post-processing settings: {error:#}"),
             ));
         }
 
-        self.config = updated;
+        self.config = Config::load(&self.config_path).unwrap_or(updated);
         self.publish(StateEvent::configuration_changed())
     }
 
@@ -380,8 +540,9 @@ impl Daemon {
         token: String,
     ) -> StateEvent {
         if self.recording.is_some() || self.pipeline.is_some() {
-            return self.decorate(StateEvent::message(
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "token_busy",
                 "Provider tokens cannot change during dictation",
             ));
         }
@@ -389,14 +550,16 @@ impl Daemon {
         let provider = provider.unwrap_or(self.config.post_processing.provider);
         let mut updated = self.credentials.clone();
         if let Err(error) = updated.set(provider, token) {
-            return self.decorate(StateEvent::message(
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "invalid_token",
                 format!("Invalid provider token: {error:#}"),
             ));
         }
         if let Err(error) = updated.save(&self.credentials_path) {
-            return self.decorate(StateEvent::message(
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "token_save_failed",
                 format!("Could not save provider token: {error:#}"),
             ));
         }
@@ -405,25 +568,94 @@ impl Daemon {
         self.publish(StateEvent::configuration_changed())
     }
 
+    fn remove_token(&mut self, provider: Option<PostProcessingProvider>) -> StateEvent {
+        if self.recording.is_some() || self.pipeline.is_some() {
+            return self.decorate(StateEvent::error(
+                self.current_state(),
+                "token_busy",
+                "Provider tokens cannot change during dictation",
+            ));
+        }
+        let provider = provider.unwrap_or(self.config.post_processing.provider);
+        let mut updated = self.credentials.clone();
+        let removed = updated.remove(provider);
+        if removed && let Err(error) = updated.save(&self.credentials_path) {
+            return self.decorate(StateEvent::error(
+                self.current_state(),
+                "token_remove_failed",
+                format!("Could not remove provider token: {error:#}"),
+            ));
+        }
+        self.credentials = updated;
+        let mut selected = self.config.post_processing.clone();
+        selected.provider = provider;
+        selected.model = None;
+        let text = if self.credentials.is_configured(&selected) {
+            "Stored token removed; an environment token remains active"
+        } else if removed {
+            "Stored token removed"
+        } else {
+            "No stored token was configured"
+        };
+        self.publish(
+            StateEvent::configuration_changed().with_notice(Notice::info("token_removed", text)),
+        )
+    }
+
     fn update_debug(&mut self, enabled: bool) -> StateEvent {
         if self.recording.is_some() || self.pipeline.is_some() {
-            return self.decorate(StateEvent::message(
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "debug_busy",
                 "Debug logging cannot change during dictation",
             ));
         }
 
-        let mut updated = self.config.clone();
+        let mut updated = match Config::load(&self.config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                return self.decorate(StateEvent::error(
+                    self.current_state(),
+                    "config_reload_failed",
+                    format!("Could not reload debug setting: {error:#}"),
+                ));
+            }
+        };
         updated.debug.enabled = enabled;
-        if let Err(error) = updated.save(&self.config_path) {
-            return self.decorate(StateEvent::message(
+        if let Err(error) = updated.save_debug_enabled(&self.config_path, enabled) {
+            return self.decorate(StateEvent::error(
                 self.current_state(),
+                "debug_save_failed",
                 format!("Could not save debug setting: {error:#}"),
             ));
         }
 
         self.config = updated;
         self.publish(StateEvent::configuration_changed())
+    }
+
+    fn clear_debug(&mut self) -> StateEvent {
+        if self.recording.is_some() || self.pipeline.is_some() {
+            return self.decorate(StateEvent::error(
+                self.current_state(),
+                "debug_busy",
+                "Debug logs cannot be cleared during dictation",
+            ));
+        }
+        match clear_debug_logs(&paths::debug_log_path()) {
+            Ok(()) => {
+                self.last_debug_entry = LastDebugEntry::default();
+                self.publish(
+                    StateEvent::configuration_changed()
+                        .with_notice(Notice::info("debug_cleared", "Debug logs cleared")),
+                )
+            }
+            Err(error) => self.decorate(StateEvent::error(
+                self.current_state(),
+                "debug_clear_failed",
+                format!("Could not clear debug logs: {error:#}"),
+            )),
+        }
     }
 
     fn start_recording(&mut self) -> StateEvent {
@@ -454,7 +686,11 @@ impl Daemon {
                 self.level = 0.0;
                 self.publish_recording()
             }
-            Err(error) => self.publish(StateEvent::message(State::Error, format!("{error:#}"))),
+            Err(error) => self.publish(StateEvent::error(
+                State::Error,
+                "microphone_start_failed",
+                format!("{error:#}"),
+            )),
         }
     }
 
@@ -478,7 +714,11 @@ impl Daemon {
                 self.raw_preview_transcript = None;
                 self.partial_transcript = None;
                 self.level = 0.0;
-                return self.publish(StateEvent::message(State::Error, error));
+                return self.publish(StateEvent::error(
+                    State::Error,
+                    "microphone_finish_failed",
+                    error,
+                ));
             }
         };
 
@@ -514,16 +754,54 @@ impl Daemon {
 
     async fn cancel(&mut self) -> StateEvent {
         if let Some(recording) = self.recording.take() {
+            self.transcriber.cancel(recording.generation);
             recording.preview_task.abort();
             recording.level_task.abort();
         }
         if let Some(pipeline) = self.pipeline.take() {
+            self.transcriber.cancel(pipeline.generation);
             pipeline.task.abort();
         }
         self.raw_preview_transcript = None;
         self.partial_transcript = None;
         self.level = 0.0;
-        self.publish(StateEvent::new(State::Idle))
+        let event = self.publish(
+            StateEvent::new(State::Idle)
+                .with_notice(Notice::info("canceled", "Dictation canceled")),
+        );
+        self.resolve_completion_waiters(event.clone());
+        event
+    }
+
+    fn capture_failed(&mut self, generation: u64, error: String) {
+        if self
+            .recording
+            .as_ref()
+            .map(|recording| recording.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        if let Some(recording) = self.recording.take() {
+            recording.preview_task.abort();
+            recording.level_task.abort();
+        }
+        self.transcriber.cancel(generation);
+        self.raw_preview_transcript = None;
+        self.partial_transcript = None;
+        self.level = 0.0;
+        let event = self.publish(StateEvent::error(
+            State::Error,
+            "microphone_capture_failed",
+            format!("Microphone capture failed: {error}"),
+        ));
+        self.resolve_completion_waiters(event);
+    }
+
+    fn resolve_completion_waiters(&mut self, event: StateEvent) {
+        for waiter in self.completion_waiters.drain(..) {
+            let _ = waiter.send(event.clone());
+        }
     }
 
     fn current_state(&self) -> State {
@@ -554,45 +832,43 @@ impl Daemon {
 }
 
 fn settings_snapshot(config: &Config, credentials: &Credentials) -> SettingsSnapshot {
+    let provider_options = post_processing::PROVIDERS
+        .iter()
+        .map(|provider| CatalogOption {
+            value: provider.provider.as_str().into(),
+            label: provider.label.into(),
+        })
+        .collect();
+    let model_catalog = post_processing::PROVIDERS
+        .iter()
+        .map(|provider| {
+            (
+                provider.provider.as_str().into(),
+                provider
+                    .models
+                    .iter()
+                    .map(|model| CatalogOption {
+                        value: model.value.into(),
+                        label: model.label.into(),
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     SettingsSnapshot {
         post_processing: PostProcessingSettings {
             enabled: config.post_processing.enabled,
             provider: config.post_processing.provider,
             model: post_processing::selected_model(&config.post_processing).to_owned(),
             token_configured: credentials.is_configured(&config.post_processing),
+            token_source: credentials.source(&config.post_processing),
+            provider_options,
+            model_catalog,
         },
         debug: DebugSettings {
             enabled: config.debug.enabled,
         },
     }
-}
-
-fn reset_debug_log(path: &Path) -> Result<()> {
-    let parent = path.parent().context("debug log path has no parent")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options
-        .open(path)
-        .with_context(|| format!("failed to reset debug log at {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = file
-            .metadata()
-            .with_context(|| format!("failed to inspect permissions for {}", path.display()))?
-            .permissions();
-        permissions.set_mode(0o600);
-        file.set_permissions(permissions)
-            .with_context(|| format!("failed to secure debug log at {}", path.display()))?;
-    }
-    Ok(())
 }
 
 fn apply_settings(
@@ -630,10 +906,33 @@ fn spawn_level_loop(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            match reader.stream_error() {
+                Ok(Some(error)) => {
+                    let _ = inbox
+                        .send(ActorMessage::CaptureFailed { generation, error })
+                        .await;
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = inbox
+                        .send(ActorMessage::CaptureFailed {
+                            generation,
+                            error: format!("{error:#}"),
+                        })
+                        .await;
+                    return;
+                }
+            }
             let level = match reader.level() {
                 Ok(level) => level,
                 Err(error) => {
-                    eprintln!("Milevox audio level stopped: {error:#}");
+                    let _ = inbox
+                        .send(ActorMessage::CaptureFailed {
+                            generation,
+                            error: format!("{error:#}"),
+                        })
+                        .await;
                     return;
                 }
             };
@@ -655,10 +954,13 @@ fn spawn_preview_loop(
     inbox: mpsc::Sender<ActorMessage>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut stabilizer = PreviewStabilizer::default();
         let mut last_sample_count = 0;
+        let mut merged_transcript = String::new();
+        let overlap = usize::try_from(reader.sample_rate())
+            .unwrap_or(usize::MAX)
+            .saturating_mul(PREVIEW_OVERLAP_SECONDS);
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(PREVIEW_INTERVAL).await;
             let sample_count = match reader.sample_count() {
                 Ok(sample_count) => sample_count,
                 Err(error) => {
@@ -666,19 +968,24 @@ fn spawn_preview_loop(
                     return;
                 }
             };
-            let audio = match reader.snapshot() {
+            let minimum_samples = usize::try_from(reader.sample_rate() / 2).unwrap_or(usize::MAX);
+            if sample_count < minimum_samples
+                || sample_count.saturating_sub(last_sample_count) < minimum_samples
+            {
+                continue;
+            }
+            let preview_start = last_sample_count.saturating_sub(overlap);
+            let audio = match reader.snapshot_from(preview_start) {
                 Ok(audio) => audio,
                 Err(error) => {
                     eprintln!("Milevox live preview stopped: {error:#}");
                     return;
                 }
             };
-            let minimum_samples = usize::try_from(audio.sample_rate / 2).unwrap_or(usize::MAX);
-            if sample_count < minimum_samples || sample_count <= last_sample_count {
-                continue;
-            }
-
-            let raw_transcript = match transcriber.transcribe_preview(audio).await {
+            // Advance by captured audio, not successful inference. A failed or empty preview
+            // must not make every later attempt copy and retranscribe the full recording.
+            last_sample_count = sample_count;
+            let segment = match transcriber.transcribe_preview(generation, audio).await {
                 Ok(Some(transcript)) => transcript,
                 Ok(None) => continue,
                 Err(error) => {
@@ -686,16 +993,15 @@ fn spawn_preview_loop(
                     continue;
                 }
             };
-            last_sample_count = sample_count;
-            let transcript = stabilizer.stabilize(&raw_transcript);
-            if transcript.is_empty() {
+            merged_transcript = merge_preview(&merged_transcript, &segment);
+            if merged_transcript.is_empty() {
                 continue;
             }
             if inbox
                 .send(ActorMessage::Preview {
                     generation,
-                    raw_transcript,
-                    transcript,
+                    raw_transcript: merged_transcript.clone(),
+                    transcript: merged_transcript.clone(),
                 })
                 .await
                 .is_err()
@@ -706,44 +1012,31 @@ fn spawn_preview_loop(
     })
 }
 
-#[derive(Default)]
-struct PreviewStabilizer {
-    committed_words: Vec<String>,
-    previous_words: Vec<String>,
-}
-
-impl PreviewStabilizer {
-    fn stabilize(&mut self, text: &str) -> String {
-        let words = text
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let agreed_count = self
-            .previous_words
-            .iter()
-            .zip(&words)
-            .take_while(|(left, right)| normalize_word(left) == normalize_word(right))
-            .count();
-        if agreed_count > self.committed_words.len() {
-            self.committed_words = self.previous_words[..agreed_count].to_vec();
-        }
-        self.previous_words = words.clone();
-
-        if words.len() <= self.committed_words.len() {
-            return self.committed_words.join(" ");
-        }
-        self.committed_words
-            .iter()
-            .chain(&words[self.committed_words.len()..])
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
 fn normalize_word(word: &str) -> String {
     word.trim_matches(|character: char| !character.is_alphanumeric())
         .to_lowercase()
+}
+
+fn merge_preview(existing: &str, next: &str) -> String {
+    if existing.trim().is_empty() {
+        return next.trim().to_owned();
+    }
+    let left = existing.split_whitespace().collect::<Vec<_>>();
+    let right = next.split_whitespace().collect::<Vec<_>>();
+    let overlap = (1..=left.len().min(right.len()))
+        .rev()
+        .find(|count| {
+            left[left.len() - count..]
+                .iter()
+                .zip(&right[..*count])
+                .all(|(left, right)| normalize_word(left) == normalize_word(right))
+        })
+        .unwrap_or(0);
+    left.iter()
+        .copied()
+        .chain(right[overlap..].iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn run_pipeline(
@@ -755,11 +1048,13 @@ async fn run_pipeline(
     transcriber: transcription::ParakeetTranscriber,
     inbox: &mpsc::Sender<ActorMessage>,
 ) -> PipelineCompletion {
-    let raw = match transcriber.transcribe(audio).await {
+    let raw = match transcriber.transcribe(generation, audio).await {
         Ok(raw) => raw,
         Err(error) => {
             let entry = failed_debug_entry(generation, &previews, &format!("{error:#}"));
-            persist_debug_entry(config.debug.enabled, &entry).await;
+            if let Err(log_error) = persist_debug_entry(config.debug.enabled, &entry).await {
+                eprintln!("Milevox could not write debug log: {log_error:#}");
+            }
             return PipelineCompletion {
                 result: Err(error),
                 debug_entry: entry,
@@ -777,55 +1072,71 @@ async fn run_pipeline(
             .context("Milevox daemon stopped during post-processing")
     {
         let entry = failed_debug_entry(generation, &previews, &format!("{error:#}"));
-        persist_debug_entry(config.debug.enabled, &entry).await;
+        if let Err(log_error) = persist_debug_entry(config.debug.enabled, &entry).await {
+            eprintln!("Milevox could not write debug log: {log_error:#}");
+        }
         return PipelineCompletion {
             result: Err(error),
             debug_entry: entry,
         };
     }
     let api_key = credentials.resolve(&config.post_processing);
-    let post_processing_input = if config.post_processing.enabled {
-        select_post_processing_input(&previews, &raw)
-    } else {
-        &raw
-    };
-    let refined = post_processing::refine(
-        &config.post_processing,
-        api_key.as_deref(),
-        post_processing_input,
-    )
-    .await;
+    let refined = post_processing::refine(&config.post_processing, api_key.as_deref(), &raw).await;
     let delivery = output::deliver(&config.output, &refined.text).await;
     let delivery_error = delivery.as_ref().err().map(|error| format!("{error:#}"));
+    let mut notices = refined
+        .warning
+        .as_ref()
+        .map(|warning| {
+            vec![
+                Notice::warning(
+                    "post_processing_fallback",
+                    "Post-processing failed; delivered the original transcript",
+                )
+                .with_detail(warning.clone()),
+            ]
+        })
+        .unwrap_or_default();
+    if let Ok(delivery) = &delivery {
+        notices.extend(delivery.notices.clone());
+    }
+    let diagnostic_warning = notices
+        .iter()
+        .map(|notice| notice.text.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
     let entry = debug_entry(
         generation,
         &previews,
         &raw,
-        post_processing_input,
+        &raw,
         DebugOutcome {
             provider_attempts: &refined.provider_attempts,
             delivered_text: &refined.text,
-            warning: refined.warning.as_deref(),
+            warning: (!diagnostic_warning.is_empty()).then_some(diagnostic_warning.as_str()),
             error: delivery_error.as_deref(),
         },
     );
-    persist_debug_entry(config.debug.enabled, &entry).await;
-    let result = delivery.map(|()| PipelineResult {
+    if let Err(error) = persist_debug_entry(config.debug.enabled, &entry).await {
+        eprintln!("Milevox could not write debug log: {error:#}");
+        notices.push(
+            Notice::warning(
+                "debug_write_failed",
+                "The transcript was delivered, but its debug log could not be written",
+            )
+            .with_detail(format!("{error:#}")),
+        );
+    }
+    let result = delivery.map(|delivery| PipelineResult {
         transcript: refined.text,
-        warning: refined.warning,
+        delivery: delivery.method,
+        notices,
     });
 
     PipelineCompletion {
         result,
         debug_entry: entry,
     }
-}
-
-fn select_post_processing_input<'a>(
-    previews: &'a PreviewTranscripts,
-    final_raw: &'a str,
-) -> &'a str {
-    previews.stabilized.as_deref().unwrap_or(final_raw)
 }
 
 fn debug_entry(
@@ -884,33 +1195,61 @@ fn failed_debug_entry(generation: u64, previews: &PreviewTranscripts, error: &st
     )
 }
 
-async fn persist_debug_entry(enabled: bool, entry: &str) {
+async fn persist_debug_entry(enabled: bool, entry: &str) -> Result<()> {
     if !enabled {
-        return;
+        return Ok(());
     }
 
     let log_path = paths::debug_log_path();
-    if let Err(error) = append_debug_log(&log_path, entry).await {
-        eprintln!("Milevox could not write debug log: {error:#}");
-    }
+    let entry = entry.to_owned();
+    tokio::task::spawn_blocking(move || append_debug_log(&log_path, &entry))
+        .await
+        .context("debug log writer stopped unexpectedly")?
 }
 
-async fn append_debug_log(path: &Path, entry: &str) -> Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-        .with_context(|| format!("failed to open debug log at {}", path.display()))?;
+fn append_debug_log(path: &Path, entry: &str) -> Result<()> {
+    let entry_size = u64::try_from(entry.len().saturating_add(2)).unwrap_or(u64::MAX);
+    let current_size = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    if current_size > 0 && current_size.saturating_add(entry_size) > DEBUG_LOG_MAX_BYTES {
+        let backup = debug_log_backup(path);
+        // The live log may predate permission hardening. Secure it before it becomes the
+        // retained backup so both generations are private.
+        private_file::secure(path)?;
+        match std::fs::remove_file(&backup) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to remove old debug log backup"),
+        }
+        std::fs::rename(path, &backup)
+            .with_context(|| format!("failed to rotate debug log at {}", path.display()))?;
+    }
+    let mut file = private_file::open_append(path)?;
     file.write_all(entry.as_bytes())
-        .await
         .with_context(|| format!("failed to write debug log at {}", path.display()))?;
     file.write_all(b"\n\n")
-        .await
         .with_context(|| format!("failed to finish debug log entry at {}", path.display()))?;
-    file.flush()
-        .await
-        .with_context(|| format!("failed to flush debug log at {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync debug log at {}", path.display()))?;
+    Ok(())
+}
+
+fn debug_log_backup(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".1");
+    name.into()
+}
+
+fn clear_debug_logs(path: &Path) -> Result<()> {
+    for candidate in [path.to_path_buf(), debug_log_backup(path)] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove {}", candidate.display()));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -919,24 +1258,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_stabilizer_commits_an_agreed_prefix() {
-        let mut stabilizer = PreviewStabilizer::default();
-
-        assert_eq!(stabilizer.stabilize("Troy and a"), "Troy and a");
-        assert_eq!(stabilizer.stabilize("troy, and Abed"), "Troy and Abed");
+    fn preview_merging_uses_the_longest_normalized_suffix_prefix() {
         assert_eq!(
-            stabilizer.stabilize("Troy and a bed in the morning"),
-            "Troy and a bed in the morning"
+            merge_preview("Troy and Abed,", "abed in the morning"),
+            "Troy and Abed, in the morning"
         );
+        assert_eq!(merge_preview("one two", "three four"), "one two three four");
+        assert_eq!(merge_preview("", "  first preview  "), "first preview");
     }
 
     #[test]
-    fn preview_stabilizer_keeps_committed_words_during_a_short_decode() {
-        let mut stabilizer = PreviewStabilizer::default();
-        stabilizer.stabilize("Greendale Community College");
-        stabilizer.stabilize("greendale community campus");
+    fn a_shorter_preview_does_not_replace_the_authoritative_final_decode() {
+        let previews = PreviewTranscripts {
+            raw: Some("First sentence".to_owned()),
+            stabilized: Some("First sentence".to_owned()),
+        };
+        let final_decode = "First sentence. A final sentence.";
+        let entry = debug_entry(
+            1,
+            &previews,
+            final_decode,
+            final_decode,
+            DebugOutcome {
+                provider_attempts: &[],
+                delivered_text: final_decode,
+                warning: None,
+                error: None,
+            },
+        );
 
-        assert_eq!(stabilizer.stabilize("Greendale"), "Greendale Community");
+        assert!(entry.contains("POST-PROCESSING INPUT:\nFirst sentence. A final sentence."));
+        assert!(entry.contains("DELIVERED TEXT:\nFirst sentence. A final sentence."));
     }
 
     #[test]
@@ -953,7 +1305,7 @@ mod tests {
             7,
             &previews,
             "Troy and a bed in the morning",
-            "Troy and Abed in the morning",
+            "Troy and a bed in the morning",
             DebugOutcome {
                 provider_attempts: &provider_attempts,
                 delivered_text: "Troy and Abed in the morning.",
@@ -968,7 +1320,7 @@ mod tests {
              LAST RAW PREVIEW:\nTroy and Abed in the morning\n\n\
              LAST STABILIZED PREVIEW:\nTroy and Abed in the morning\n\n\
              FINAL RAW:\nTroy and a bed in the morning\n\n\
-             POST-PROCESSING INPUT:\nTroy and Abed in the morning\n\n\
+             POST-PROCESSING INPUT:\nTroy and a bed in the morning\n\n\
              PROVIDER RESPONSE 1:\nTroy and Abed in the morning.\n\n\
              PROVIDER VALIDATION 1:\naccepted\n\n\
              DELIVERED TEXT:\nTroy and Abed in the morning.\n\n\
@@ -1043,16 +1395,24 @@ mod tests {
     }
 
     #[test]
-    fn resetting_the_debug_log_discards_the_previous_session() {
+    fn debug_entries_append_across_sessions_and_correct_permissions() {
         let directory =
-            std::env::temp_dir().join(format!("milevox-debug-log-reset-{}", std::process::id()));
+            std::env::temp_dir().join(format!("milevox-debug-log-append-{}", std::process::id()));
         let path = directory.join("debug.log");
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(&path, "previous session").unwrap();
+        std::fs::write(&path, "previous session\n\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
 
-        reset_debug_log(&path).unwrap();
+        append_debug_log(&path, "new session").unwrap();
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "previous session\n\nnew session\n\n"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1064,46 +1424,73 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[tokio::test]
-    async fn debug_entries_append_within_a_session() {
+    #[test]
+    fn debug_log_rotates_one_private_backup_and_clear_removes_both() {
         let directory =
-            std::env::temp_dir().join(format!("milevox-debug-log-append-{}", std::process::id()));
+            std::env::temp_dir().join(format!("milevox-debug-log-rotation-{}", std::process::id()));
         let path = directory.join("debug.log");
-        reset_debug_log(&path).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, vec![b'x'; DEBUG_LOG_MAX_BYTES as usize]).unwrap();
 
-        append_debug_log(&path, "recording one").await.unwrap();
-        append_debug_log(&path, "recording two").await.unwrap();
+        append_debug_log(&path, "next recording").unwrap();
 
+        let backup = debug_log_backup(&path);
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().len(),
+            DEBUG_LOG_MAX_BYTES
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "recording one\n\nrecording two\n\n"
+            "next recording\n\n"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        clear_debug_logs(&path).unwrap();
+        assert!(!path.exists());
+        assert!(!backup.exists());
+        clear_debug_logs(&path).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[test]
-    fn post_processing_prefers_the_stabilized_preview() {
-        let previews = PreviewTranscripts {
-            raw: Some("Troy and a bed".to_owned()),
-            stabilized: Some("Troy and Abed".to_owned()),
-        };
+    #[tokio::test]
+    async fn ipc_reader_enforces_the_request_limit() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (reader, _) = server.into_split();
+        let write = tokio::spawn(async move {
+            let (_, mut writer) = client.into_split();
+            writer
+                .write_all(&vec![b'x'; MAX_IPC_REQUEST_BYTES + 1])
+                .await
+                .unwrap();
+            writer.write_all(b"\n").await.unwrap();
+        });
 
-        assert_eq!(
-            select_post_processing_input(&previews, "Troy and a bet"),
-            "Troy and Abed"
-        );
+        let error = read_request(reader).await.unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+        write.await.unwrap();
     }
 
-    #[test]
-    fn post_processing_uses_the_final_decode_without_a_preview() {
-        let previews = PreviewTranscripts {
-            raw: None,
-            stabilized: None,
-        };
-
-        assert_eq!(
-            select_post_processing_input(&previews, "Study at Greendale"),
-            "Study at Greendale"
+    #[tokio::test]
+    async fn ipc_peer_for_a_local_socket_has_the_current_uid() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        verify_peer(&client).unwrap();
+        verify_peer_uid(paths::current_uid()).unwrap();
+        assert!(
+            verify_peer_uid(paths::current_uid().wrapping_add(1))
+                .unwrap_err()
+                .to_string()
+                .contains("another user")
         );
     }
 
@@ -1137,6 +1524,6 @@ mod tests {
 
         let error = apply_settings(&config, None, None, Some("glm-5.2".to_owned())).unwrap_err();
 
-        assert!(error.to_string().contains("curated OpenRouter model list"));
+        assert!(error.to_string().contains("valid models"));
     }
 }

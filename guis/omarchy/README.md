@@ -1,92 +1,59 @@
 # Milevox GUI for Omarchy
 
-This optional integration adds a bar widget, settings panel, live transcript
-overlay, and Hyprland keybindings to Omarchy. Milevox remains a separate CLI
-and daemon.
+This integration adds a bar widget, keyboard-friendly settings panel, live
+overlay, and Hyprland bindings. It requires Milevox on `PATH`, Omarchy Shell,
+`hyprctl`, and `jq`.
 
-## Requirements
+## Install and remove
 
-- A working Milevox installation
-- `milevox` available on `PATH`
-- Omarchy and Omarchy Shell
-- `hyprctl` and `jq`
-
-## Install
-
-Tagged GitHub releases include an architecture-independent pacman package.
-Download it from the release page, then install and activate it for the current
-user:
+Install the GUI package and activate it:
 
 ```sh
 sudo pacman -U ./milevox-omarchy-VERSION-1-any.pkg.tar.zst
 milevox-omarchy install
 ```
 
-This command installs the speech model, enables and starts the Milevox user
-service, then installs the GUI and keybindings.
+From a checkout use `./guis/omarchy/install.sh`. Check conflicting shortcuts
+first with `omarchy menu keybindings --print`; custom bindings are accepted via
+`--toggle-key "SUPER + ALT + V"` and `--push-to-talk-key "F10"`.
 
-To install from a source checkout instead, use the bundled installer.
-
-From the Milevox source checkout, run:
-
-```sh
-./guis/omarchy/install.sh
-```
-
-The installer copies this directory's plugin files to
-`~/.config/omarchy/plugins/io.github.rselbach.milevox`, enables the widget, and
-adds these default bindings:
-
-- `SUPER + CTRL + X` toggles dictation.
-- Holding `F9` starts dictation and releasing it stops dictation.
-
-Pass different bindings when those keys are already assigned:
-
-```sh
-./guis/omarchy/install.sh \
-  --toggle-key "SUPER + ALT + V" \
-  --push-to-talk-key "F10"
-```
-
-Check current assignments before choosing keys:
-
-```sh
-omarchy menu keybindings --print
-```
-
-The overlay appears near the bottom of the screen while Milevox records,
-transcribes, and refines. It shows microphone activity and a stabilized live
-transcript, then briefly shows the final text. Left-click the microphone icon
-to open settings. Right-click it to toggle recording.
-
-## Remove
-
-For a package installation, remove the user configuration before uninstalling
-the package:
+Remove user integration **before** removing the package:
 
 ```sh
 milevox-omarchy uninstall
 sudo pacman -R milevox-omarchy
 ```
 
-From a source checkout, run:
+The source equivalent is `./guis/omarchy/uninstall.sh`. GUI removal preserves
+the daemon, configuration, credentials, logs, and downloaded models. See
+[privacy](../../docs/privacy.md) to remove those separately.
+
+## Controls
+
+- `SUPER + CTRL + X` toggles recording. Holding `F9` records until release.
+- Left-click the bar icon to open the panel; right-click toggles recording.
+- The primary button starts, stops, cancels active transcription/refinement, or
+  restarts an unavailable service.
+- Tab and Shift+Tab move focus. Enter or Space activates the focused button.
+  Escape clears the token field, closes an idle panel, or cancels active work.
+
+Stopping submits captured audio for transcription. Cancelling discards the
+current recording or in-progress work. A completed warning remains visible in
+the bar after the overlay closes. Clipboard fallback means delivery could not
+type into the focused app: paste the copied transcript manually.
+
+## Recovery
+
+Use the panel's **Restart** action, or run:
 
 ```sh
-./guis/omarchy/uninstall.sh
+systemctl --user restart milevox.service
+journalctl --user -u milevox.service -n 100
 ```
 
-This removes only the Omarchy plugin and its keybindings. It preserves the
-Milevox CLI, daemon, configuration, credentials, logs, and models.
+If settings disappear, the daemon connection was lost; they return after a
+successful reconnect. For deeper investigation see
+[diagnostics](../../docs/diagnostics.md).
 
-## Develop
-
-Validate the plugin from the repository root:
-
-```sh
-make check-guis
-```
-
-For live development, link this directory to
-`~/.config/omarchy/plugins/io.github.rselbach.milevox` and run
-`omarchy restart shell` after QML changes. Omarchy's file watcher does not
-follow the development symlink.
+For source development, validate from the repository root with `make check-guis`
+and restart the shell after changes (`omarchy restart shell`).

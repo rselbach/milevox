@@ -1,6 +1,5 @@
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -8,6 +7,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{PostProcessingConfig, PostProcessingProvider};
 use crate::post_processing;
+use crate::private_file;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    Stored,
+    Environment,
+    None,
+}
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -24,6 +32,7 @@ impl Credentials {
             return Ok(Self::default());
         }
 
+        private_file::secure(path)?;
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read credentials at {}", path.display()))?;
         toml::from_str(&contents)
@@ -31,55 +40,8 @@ impl Credentials {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let parent = path.parent().context("credentials path has no parent")?;
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
         let contents = toml::to_string_pretty(self).context("failed to serialize credentials")?;
-        let temporary_path = path.with_extension("toml.tmp");
-
-        let write_result = (|| -> Result<()> {
-            let mut options = OpenOptions::new();
-            options.create(true).truncate(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary_path).with_context(|| {
-                format!(
-                    "failed to open temporary credentials at {}",
-                    temporary_path.display()
-                )
-            })?;
-            file.write_all(contents.as_bytes()).with_context(|| {
-                format!(
-                    "failed to write temporary credentials at {}",
-                    temporary_path.display()
-                )
-            })?;
-            file.sync_all().with_context(|| {
-                format!(
-                    "failed to sync temporary credentials at {}",
-                    temporary_path.display()
-                )
-            })?;
-            fs::rename(&temporary_path, path)
-                .with_context(|| format!("failed to replace credentials at {}", path.display()))?;
-            Ok(())
-        })();
-
-        if let Err(error) = write_result {
-            if let Err(cleanup_error) = fs::remove_file(&temporary_path)
-                && cleanup_error.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!(
-                    "Milevox could not remove {}: {cleanup_error}",
-                    temporary_path.display()
-                );
-            }
-            return Err(error);
-        }
-        Ok(())
+        private_file::atomic_write(path, contents.as_bytes())
     }
 
     pub fn set(&mut self, provider: PostProcessingProvider, token: String) -> Result<()> {
@@ -110,6 +72,26 @@ impl Credentials {
 
     pub fn is_configured(&self, config: &PostProcessingConfig) -> bool {
         self.resolve(config).is_some()
+    }
+
+    pub fn source(&self, config: &PostProcessingConfig) -> TokenSource {
+        if self.stored(config.provider).is_some() {
+            TokenSource::Stored
+        } else if env::var(post_processing::api_key_env(config))
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            TokenSource::Environment
+        } else {
+            TokenSource::None
+        }
+    }
+
+    pub fn remove(&mut self, provider: PostProcessingProvider) -> bool {
+        match provider {
+            PostProcessingProvider::Openrouter => self.openrouter.take().is_some(),
+            PostProcessingProvider::OpencodeZen => self.opencode_zen.take().is_some(),
+        }
     }
 
     fn stored(&self, provider: PostProcessingProvider) -> Option<&str> {
@@ -201,5 +183,26 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("whitespace"));
+    }
+
+    #[test]
+    fn removes_only_the_selected_stored_token() {
+        let mut credentials = Credentials::default();
+        credentials
+            .set(
+                PostProcessingProvider::Openrouter,
+                "openrouter-token".into(),
+            )
+            .unwrap();
+        credentials
+            .set(PostProcessingProvider::OpencodeZen, "zen-token".into())
+            .unwrap();
+
+        assert!(credentials.remove(PostProcessingProvider::Openrouter));
+        assert!(!credentials.remove(PostProcessingProvider::Openrouter));
+        assert_eq!(
+            credentials.stored(PostProcessingProvider::OpencodeZen),
+            Some("zen-token")
+        );
     }
 }

@@ -37,6 +37,8 @@ package() {
     "${pkgdir}/usr/bin/milevox-download-model"
   install -Dm755 "${source_dir}/scripts/setup-user.sh" \
     "${pkgdir}/usr/bin/milevox-setup"
+  install -Dm755 "${source_dir}/scripts/teardown-user.sh" \
+    "${pkgdir}/usr/bin/milevox-teardown"
 
   install -Dm644 "${source_dir}/packaging/systemd/milevox.service" \
     "${pkgdir}/usr/lib/systemd/user/milevox.service"
@@ -47,6 +49,10 @@ package() {
     "${pkgdir}/usr/share/doc/${pkgname}/environment.example"
   install -Dm644 "${source_dir}/README.md" \
     "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  for doc in configuration diagnostics privacy; do
+    install -Dm644 "${source_dir}/docs/${doc}.md" \
+      "${pkgdir}/usr/share/doc/${pkgname}/docs/${doc}.md"
+  done
   install -Dm644 "${source_dir}/LICENSE" \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }

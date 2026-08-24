@@ -1,9 +1,11 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use toml_edit::{DocumentMut, value};
+
+use crate::private_file;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -20,64 +22,67 @@ impl Config {
             return Ok(Self::default());
         }
 
+        private_file::secure(path)?;
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read configuration at {}", path.display()))?;
         toml::from_str(&contents)
             .with_context(|| format!("failed to parse configuration at {}", path.display()))
     }
 
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> Result<()> {
-        let parent = path.parent().context("configuration path has no parent")?;
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
         let contents = toml::to_string_pretty(self).context("failed to serialize configuration")?;
-        let temporary_path = path.with_extension("toml.tmp");
-
-        let write_result = (|| -> Result<()> {
-            let mut options = OpenOptions::new();
-            options.create(true).truncate(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary_path).with_context(|| {
-                format!(
-                    "failed to open temporary configuration at {}",
-                    temporary_path.display()
-                )
-            })?;
-            file.write_all(contents.as_bytes()).with_context(|| {
-                format!(
-                    "failed to write temporary configuration at {}",
-                    temporary_path.display()
-                )
-            })?;
-            file.sync_all().with_context(|| {
-                format!(
-                    "failed to sync temporary configuration at {}",
-                    temporary_path.display()
-                )
-            })?;
-            fs::rename(&temporary_path, path).with_context(|| {
-                format!("failed to replace configuration at {}", path.display())
-            })?;
-            Ok(())
-        })();
-
-        if let Err(error) = write_result {
-            if let Err(cleanup_error) = fs::remove_file(&temporary_path)
-                && cleanup_error.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!(
-                    "Milevox could not remove {}: {cleanup_error}",
-                    temporary_path.display()
-                );
-            }
-            return Err(error);
-        }
-        Ok(())
+        private_file::atomic_write(path, contents.as_bytes())
     }
+
+    pub fn save_post_processing(
+        &self,
+        path: &Path,
+        enabled: Option<bool>,
+        provider: Option<PostProcessingProvider>,
+        model: Option<&str>,
+        remove_model: bool,
+    ) -> Result<()> {
+        let mut document = load_document(path)?;
+        if let Some(enabled) = enabled {
+            document["post_processing"]["enabled"] = value(enabled);
+        }
+        if let Some(provider) = provider {
+            document["post_processing"]["provider"] = value(provider.as_str());
+        }
+        if let Some(model) = model {
+            document["post_processing"]["model"] = value(model);
+        } else if remove_model && let Some(table) = document["post_processing"].as_table_mut() {
+            table.remove("model");
+        }
+        private_file::atomic_write(path, document.to_string().as_bytes())
+    }
+
+    pub fn save_debug_enabled(&self, path: &Path, enabled: bool) -> Result<()> {
+        let mut document = load_document(path)?;
+        document["debug"]["enabled"] = value(enabled);
+        private_file::atomic_write(path, document.to_string().as_bytes())
+    }
+}
+
+impl PostProcessingProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openrouter => "openrouter",
+            Self::OpencodeZen => "opencode_zen",
+        }
+    }
+}
+
+fn load_document(path: &Path) -> Result<DocumentMut> {
+    if !path.exists() {
+        return Ok(DocumentMut::new());
+    }
+    private_file::secure(path)?;
+    fs::read_to_string(path)
+        .with_context(|| format!("failed to read configuration at {}", path.display()))?
+        .parse::<DocumentMut>()
+        .with_context(|| format!("failed to parse configuration at {}", path.display()))
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -194,6 +199,39 @@ mod tests {
         assert_eq!(loaded.post_processing.model.as_deref(), Some("glm-5.2"));
         assert!(loaded.debug.enabled);
         assert!(!path.with_extension("toml.tmp").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn targeted_updates_preserve_comments_order_and_unrelated_values() {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("milevox-config-edit-{}-{id}", std::process::id()));
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            &path,
+            "# hand written\n[output]\nmode = \"clipboard\" # keep\n\n[post_processing]\nenabled = false\nprovider = \"openrouter\"\nmodel = \"~openai/gpt-mini-latest\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+
+        config
+            .save_post_processing(
+                &path,
+                Some(true),
+                Some(PostProcessingProvider::OpencodeZen),
+                None,
+                true,
+            )
+            .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with("# hand written\n[output]"));
+        assert!(contents.contains("mode = \"clipboard\" # keep"));
+        assert!(contents.contains("enabled = true"));
+        assert!(contents.contains("provider = \"opencode_zen\""));
+        assert!(!contents.contains("model ="));
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

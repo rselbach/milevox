@@ -3,6 +3,8 @@
 # Build the architecture-independent Milevox integration archive for Omarchy.
 
 set -euo pipefail
+# shellcheck source=scripts/lib-release.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib-release.sh"
 
 TEMP_DIR=""
 
@@ -39,11 +41,7 @@ main() {
 
   repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
   dist_dir="${repo_dir}/dist"
-  version="$(
-    awk -F '"' '/^version = / { print $2; exit }' \
-      "${repo_dir}/Cargo.toml"
-  )"
-  [[ -n "${version}" ]] || fail "could not read the Cargo package version"
+  version="$(project_version "${repo_dir}")" || fail "invalid project version"
   manifest_version="$(jq -r '.version // empty' \
     "${repo_dir}/guis/omarchy/manifest.json")"
   [[ "${manifest_version}" == "${version}" ]] ||
@@ -51,7 +49,8 @@ main() {
 
   archive_name="milevox-omarchy-${version}.tar.gz"
   archive_path="${dist_dir}/${archive_name}"
-  TEMP_DIR="$(mktemp -d)"
+  mkdir -p -- "${dist_dir}"
+  TEMP_DIR="$(mktemp -d "${dist_dir}/.milevox-omarchy-package.XXXXXX")"
   trap cleanup EXIT
   stage_dir="${TEMP_DIR}/milevox-omarchy-${version}"
 
@@ -60,24 +59,23 @@ main() {
     "${repo_dir}/guis/omarchy/install.sh" \
     "${repo_dir}/guis/omarchy/uninstall.sh" \
     "${repo_dir}/guis/omarchy/milevox-omarchy" \
+    "${repo_dir}/guis/omarchy/bindings-common.sh" \
     "${stage_dir}/"
   install -m 0644 \
     "${repo_dir}/guis/omarchy/manifest.json" \
     "${repo_dir}/guis/omarchy/Panel.qml" \
     "${repo_dir}/guis/omarchy/MilevoxOverlay.qml" \
+    "${repo_dir}/guis/omarchy/MilevoxStatus.qml" \
     "${repo_dir}/guis/omarchy/README.md" \
     "${repo_dir}/LICENSE" \
     "${stage_dir}/"
 
-  mkdir -p -- "${dist_dir}"
-  rm -f -- "${archive_path}" "${archive_path}.sha256"
-  tar --create --gzip --file "${archive_path}" \
+  tar --create --gzip --file "${TEMP_DIR}/${archive_name}" \
     --sort=name --owner 0 --group 0 --numeric-owner --mtime '@0' \
     --directory "${TEMP_DIR}" "$(basename -- "${stage_dir}")"
-  (
-    cd -- "${dist_dir}"
-    sha256sum -- "${archive_name}" >"${archive_name}.sha256"
-  )
+  ( cd -- "${TEMP_DIR}"; sha256sum -- "${archive_name}" >"${archive_name}.sha256" )
+  mv -f -- "${TEMP_DIR}/${archive_name}" "${archive_path}"
+  mv -f -- "${TEMP_DIR}/${archive_name}.sha256" "${archive_path}.sha256"
 
   echo "Omarchy release archive: ${archive_path}"
   echo "Checksum: ${archive_path}.sha256"

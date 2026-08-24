@@ -1,4 +1,5 @@
-.PHONY: check check-all check-guis check-gui-shell check-release-metadata \
+.PHONY: check check-all check-ci check-guis check-gui-shell check-metadata \
+	check-release-metadata \
 	check-shell format install install-omarchy-gui package package-arch \
 	package-core package-omarchy prepare-release uninstall uninstall-omarchy-gui \
 	validate-omarchy-gui
@@ -10,11 +11,19 @@ check: check-shell
 
 check-all: check check-guis
 
+check-ci: check-shell check-metadata
+	cargo fmt --all -- --check
+	cargo clippy --locked --all-targets -- -D warnings
+	cargo test --locked --all-targets
+	@for test in tests/*.sh; do "$$test"; done
+
 check-guis: check-gui-shell check-release-metadata validate-omarchy-gui
 
-check-release-metadata:
+check-metadata check-release-metadata:
 	@package_version="$$(awk -F '"' \
 		'/^version = / { print $$2; exit }' Cargo.toml)"; \
+	bash -c 'source scripts/lib-release.sh; validate_version "$$1"' _ \
+		"$${package_version}" || { echo "invalid package version: $${package_version}" >&2; exit 1; }; \
 	manifest_version="$$(jq -r '.version // empty' \
 		guis/omarchy/manifest.json)"; \
 	if [ "$${manifest_version}" != "$${package_version}" ]; then \
@@ -22,34 +31,17 @@ check-release-metadata:
 			"does not match $${package_version}" >&2; \
 		exit 1; \
 	fi
-	./tests/prepare-release.sh
 
 check-shell:
-	bash -n install.sh uninstall.sh scripts/download-model.sh \
-		scripts/setup-user.sh \
-		scripts/package-arch-release.sh scripts/package-omarchy-release.sh \
-		scripts/package-release.sh scripts/prepare-release.sh \
-		guis/omarchy/milevox-omarchy
-	@if command -v shellcheck >/dev/null; then \
-		shellcheck install.sh uninstall.sh scripts/download-model.sh \
-			scripts/setup-user.sh \
-			scripts/package-arch-release.sh \
-			scripts/package-omarchy-release.sh scripts/package-release.sh \
-			scripts/prepare-release.sh \
-			guis/omarchy/milevox-omarchy; \
-	else \
-		echo "shellcheck not installed; skipped"; \
-	fi
+	@files="$$(find . -type f \( -name '*.sh' -o -path './guis/omarchy/milevox-omarchy' \) -print)"; \
+		fragments="$$(find packaging -type f -name '*.install' -print)"; \
+		bash -n $$files $$fragments; \
+		command -v shellcheck >/dev/null || { echo 'shellcheck is required' >&2; exit 1; }; \
+		shellcheck -x $$files; shellcheck -x --shell=bash $$fragments
 
 check-gui-shell:
 	bash -n guis/omarchy/install.sh guis/omarchy/uninstall.sh \
 		tests/omarchy-install.sh
-	@if command -v shellcheck >/dev/null; then \
-		shellcheck guis/omarchy/install.sh guis/omarchy/uninstall.sh \
-			tests/omarchy-install.sh; \
-	else \
-		echo "shellcheck not installed; skipped"; \
-	fi
 	./tests/omarchy-install.sh
 
 format:
@@ -64,7 +56,7 @@ install:
 install-omarchy-gui:
 	./guis/omarchy/install.sh
 
-package: package-arch
+package: package-core package-omarchy
 
 package-arch: package-core package-omarchy
 	./scripts/package-arch-release.sh milevox \

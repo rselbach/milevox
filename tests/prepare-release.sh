@@ -35,11 +35,18 @@ main() {
     "${test_repo}/guis/omarchy/manifest.json"
   install -m 0755 "${repo_dir}/scripts/prepare-release.sh" \
     "${test_repo}/scripts/prepare-release.sh"
+  install -m 0644 "${repo_dir}/scripts/lib-release.sh" \
+    "${test_repo}/scripts/lib-release.sh"
 
   if "${test_repo}/scripts/prepare-release.sh" v1.2.3 \
     >/dev/null 2>&1; then
     fail "accepted a version with a v prefix"
   fi
+  for invalid in 01.2.3 1.02.3 1.2.03 1.2.3-rc1 1.2.3+build; do
+    if "${test_repo}/scripts/prepare-release.sh" "${invalid}" >/dev/null 2>&1; then
+      fail "accepted invalid version ${invalid}"
+    fi
+  done
   "${test_repo}/scripts/prepare-release.sh" "${TEST_VERSION}" \
     >/dev/null
 

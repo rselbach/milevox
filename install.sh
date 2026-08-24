@@ -69,6 +69,8 @@ main() {
     esac
   done
 
+  (( EUID != 0 )) || fail "run this command without sudo"
+
   require_command install
   require_command systemctl
   require_command wl-copy

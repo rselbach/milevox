@@ -1,177 +1,69 @@
 import QtQuick
-import Quickshell.Io
+import Quickshell
 import qs.Commons
 import qs.Ui
 
 Panel {
   id: root
-
   moduleName: "io.github.rselbach.milevox"
   ipcTarget: "milevox"
 
-  property string state: "unavailable"
-  property string message: "The Milevox daemon is not running."
-  property string transcript: ""
-  property string partialTranscript: ""
-  property bool settingsAvailable: false
-  property bool postProcessingEnabled: false
-  property string postProcessingProvider: "openrouter"
-  property string postProcessingModel: ""
-  property bool tokenConfigured: false
-
-  readonly property bool busy: state === "transcribing" || state === "refining"
-  readonly property bool recording: state === "recording"
-  readonly property bool settingsEnabled: settingsAvailable && !recording
-    && !busy && !actionProcess.running && !tokenProcess.running
-  readonly property string providerName: postProcessingProvider === "opencode_zen"
-    ? "OpenCode Zen" : "OpenRouter"
-  readonly property var providerOptions: [
-    { value: "openrouter", label: "OpenRouter" },
-    { value: "opencode_zen", label: "OpenCode Zen" }
-  ]
-  readonly property var openrouterModels: [
-    { value: "~openai/gpt-mini-latest", label: "OpenAI GPT Mini" },
-    { value: "~anthropic/claude-haiku-latest", label: "Anthropic Claude Haiku" },
-    { value: "google/gemini-3.1-flash-lite", label: "Google Gemini Flash Lite" },
-    { value: "openai/gpt-5.6-luna", label: "OpenAI GPT-5.6 Luna" }
-  ]
-  readonly property var zenModels: [
-    { value: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
-    { value: "minimax-m3", label: "MiniMax M3" },
-    { value: "glm-5.2", label: "GLM 5.2" },
-    { value: "gpt-5.6-luna", label: "OpenAI GPT-5.6 Luna" }
-  ]
-  readonly property var modelOptions: postProcessingProvider === "opencode_zen"
-    ? zenModels : openrouterModels
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
-
-  function updateStatus(line) {
-    try {
-      var event = JSON.parse(String(line || ""))
-      if (event.type !== "state") return
-      root.state = String(event.state || "unavailable")
-      root.message = String(event.message || "")
-      if (event.transcript !== undefined) root.transcript = String(event.transcript)
-      if (event.partial_transcript !== undefined)
-        root.partialTranscript = String(event.partial_transcript)
-      if (event.settings && event.settings.post_processing) {
-        var settings = event.settings.post_processing
-        root.postProcessingEnabled = Boolean(settings.enabled)
-        root.postProcessingProvider = String(settings.provider || "openrouter")
-        root.postProcessingModel = String(settings.model || "")
-        root.tokenConfigured = Boolean(settings.token_configured)
-        root.settingsAvailable = true
-      }
-    } catch (error) {
-      root.state = "unavailable"
-      root.message = "Milevox returned invalid status data."
-    }
+  readonly property bool settingsEnabled: status.settingsAvailable && !status.recording
+    && !status.busy && !status.actionRunning
+  readonly property string primaryLabel: !status.available ? "Restart"
+    : status.recording ? "Stop" : status.busy ? "Cancel" : "Start"
+  readonly property string providerName: {
+    for (var i = 0; i < status.providerOptions.length; ++i)
+      if (status.providerOptions[i].value === status.postProcessingProvider)
+        return status.providerOptions[i].label
+    return status.postProcessingProvider
   }
 
-  function runAction(args) {
-    if (actionProcess.running) return
-    actionProcess.command = ["milevox"].concat(args)
-    actionProcess.running = true
-  }
-
-  function toggleRecording() {
-    if (!busy) runAction(["record", "toggle"])
-  }
+  implicitWidth: barButton.implicitWidth
+  implicitHeight: barButton.implicitHeight
 
   function updateSettings(args) {
-    if (!settingsEnabled) return
-    runAction(["settings", "set"].concat(args))
+    if (settingsEnabled) status.run(["settings", "set"].concat(args))
   }
 
-  function saveToken() {
-    if (!settingsEnabled || tokenField.text.trim() === "") return
-    tokenProcess.command = [
-      "milevox", "settings", "token", "--provider", postProcessingProvider
-    ]
-    tokenProcess.running = true
-  }
-
-  onOpenedChanged: if (!opened) tokenField.text = ""
-  onPostProcessingProviderChanged: tokenField.text = ""
-
-  Process {
-    id: statusProcess
-    command: ["milevox", "status", "--follow"]
-    running: true
-    stdout: SplitParser { onRead: function(line) { root.updateStatus(line) } }
-    onExited: {
-      root.state = "unavailable"
-      root.message = "The Milevox daemon is not running."
-      reconnectTimer.restart()
-    }
-  }
-
-  Process {
-    id: actionProcess
-    command: []
-    stdout: SplitParser { onRead: function(line) { root.updateStatus(line) } }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (String(text || "").trim() !== "")
-        root.message = String(text).trim()
-    }
-    onExited: if (!statusProcess.running) reconnectTimer.restart()
-  }
-
-  Process {
-    id: tokenProcess
-    command: []
-    stdinEnabled: true
-    stdout: SplitParser { onRead: function(line) { root.updateStatus(line) } }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (String(text || "").trim() !== "")
-        root.message = String(text).trim()
-    }
-    onStarted: {
-      var token = tokenField.text
-      tokenField.text = ""
-      tokenProcess.write(token + "\n")
-    }
-    onExited: if (!statusProcess.running) reconnectTimer.restart()
-  }
-
-  Timer {
-    id: reconnectTimer
-    interval: 2000
-    repeat: false
-    onTriggered: if (!statusProcess.running) statusProcess.running = true
+  MilevoxStatus {
+    id: status
+    onTokenSaved: tokenField.text = ""
   }
 
   BarIconButton {
-    id: button
+    id: barButton
     anchors.fill: parent
     bar: root.bar
-    text: root.recording ? "󰍬" : (root.busy ? "󰔟" : "󰍭")
-    active: root.recording
-    dimmed: root.state === "unavailable"
-    tooltipText: root.recording ? "Milevox. Right-click to stop dictation"
-      : "Milevox. Right-click to start dictation"
+    text: status.recording ? "󰍬" : (status.busy ? "󰔟" : "󰍭")
+    active: status.recording || (status.hasWarning && status.state === "idle")
+    activeColor: status.hasWarning && status.state === "idle" ? root.urgent : Color.accent
+    dimmed: !status.available
+    tooltipText: status.hasWarning ? "Milevox: finished with warning"
+      : "Milevox. Right-click to " + root.primaryLabel.toLowerCase()
+    Accessible.role: Accessible.Button
+    Accessible.name: status.recording ? "Milevox, recording"
+      : status.busy ? "Milevox, processing" : "Milevox"
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) root.toggleRecording()
+      if (buttonCode === Qt.RightButton)
+        status.primaryAction()
       else root.toggle()
     }
   }
 
   KeyboardPanel {
     id: panel
-    anchorItem: button
+    anchorItem: barButton
     owner: root
     bar: root.bar
     open: root.opened
-    contentWidth: panel.fittedContentWidth(Style.space(350))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(640))
+    contentWidth: panel.fittedContentWidth(Math.min(Style.space(420), Screen.width - Style.space(32)))
+    contentHeight: panel.fittedContentHeight(content.implicitHeight, Screen.height - Style.space(64))
+    focusTarget: primaryButton
 
     Column {
       id: content
@@ -181,121 +73,113 @@ Panel {
       PanelHero {
         width: parent.width
         title: "Milevox"
-        meta: root.state.charAt(0).toUpperCase() + root.state.slice(1)
+        meta: status.hasWarning && status.state === "idle" ? "Finished with warning"
+          : status.state.charAt(0).toUpperCase() + status.state.slice(1)
         foreground: root.foreground
         fontFamily: root.fontFamily
       }
 
       Text {
-        visible: root.message !== ""
+        visible: status.displayMessage !== ""
         width: parent.width
-        text: root.message
-        color: root.state === "error" || root.state === "unavailable" ? root.urgent : root.dim
+        text: status.displayMessage
+        color: status.state === "error" || !status.available || status.hasWarning ? root.urgent : root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.WordWrap
       }
 
-      Rectangle {
+      Button {
+        id: primaryButton
         width: parent.width
-        implicitHeight: actionLabel.implicitHeight + Style.space(16)
-        radius: Style.cornerRadius
-        color: actionMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
-        border.width: 1
-        border.color: root.dim
-
-        Text {
-          id: actionLabel
-          anchors.centerIn: parent
-          text: root.recording ? "Stop dictation" : (root.busy ? "Working…" : "Start dictation")
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
+        text: root.primaryLabel
+        bordered: true
+        focusable: true
+        enabled: !status.actionRunning
+        foreground: root.foreground
+        accent: status.state === "error" ? root.urgent : Color.accent
+        fontFamily: root.fontFamily
+        Accessible.role: Accessible.Button
+        Accessible.name: root.primaryLabel + " Milevox dictation"
+        onClicked: status.primaryAction()
+        Keys.onEscapePressed: {
+          if (status.recording || status.busy) status.run(["record", "cancel"])
+          else root.opened = false
         }
-
-        MouseArea {
-          id: actionMouse
-          anchors.fill: parent
-          enabled: !root.busy
-          hoverEnabled: true
-          cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-          onClicked: root.toggleRecording()
-        }
-      }
-
-      Rectangle {
-        width: parent.width
-        height: Math.max(1, Style.space(1))
-        color: Util.alpha(Color.popups.border, 0.7)
       }
 
       Text {
+        visible: !status.available
         width: parent.width
-        text: "POST-PROCESSING"
+        text: "If restart fails, inspect: journalctl --user -u milevox.service -n 100"
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: true
-        font.letterSpacing: 1.1
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.WrapAnywhere
+      }
+
+      Rectangle { width: parent.width; height: Math.max(1, Style.space(1)); color: Util.alpha(Color.popups.border, 0.7) }
+      Text { width: parent.width; text: "POST-PROCESSING"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1.1 }
+
+      Text {
+        width: parent.width
+        text: "Privacy: cleanup sends transcript text to the selected provider. Audio stays local."
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.WordWrap
       }
 
       Toggle {
         width: parent.width
         label: "Clean up transcript"
-        description: "Apply dictated formatting, corrections, and punctuation."
-        checked: root.postProcessingEnabled
+        description: "Apply formatting, corrections, and punctuation."
+        checked: status.postProcessingEnabled
         enabled: root.settingsEnabled
         opacity: enabled ? 1 : 0.5
         foreground: root.foreground
         accent: Color.accent
         fontFamily: root.fontFamily
-        onClicked: root.updateSettings([
-          "--enabled", root.postProcessingEnabled ? "false" : "true"
-        ])
+        Accessible.name: "Clean up transcript"
+        Accessible.role: Accessible.CheckBox
+        onClicked: root.updateSettings(["--enabled", status.postProcessingEnabled ? "false" : "true"])
       }
 
       Dropdown {
         width: parent.width
         label: "Provider"
-        value: root.postProcessingProvider
-        options: root.providerOptions
-        enabled: root.settingsEnabled && root.postProcessingEnabled
+        value: status.postProcessingProvider
+        options: status.providerOptions
+        enabled: root.settingsEnabled && status.postProcessingEnabled && options.length > 0
         opacity: enabled ? 1 : 0.5
         foreground: root.foreground
         fontFamily: root.fontFamily
-        onChanged: function(value) {
-          root.updateSettings(["--provider", value])
-        }
+        Accessible.name: "Post-processing provider"
+        Accessible.role: Accessible.ComboBox
+        onChanged: function(value) { root.updateSettings(["--provider", value]) }
       }
 
       Dropdown {
         width: parent.width
         label: "Model"
-        value: root.postProcessingModel
-        options: root.modelOptions
-        enabled: root.settingsEnabled && root.postProcessingEnabled
+        value: status.postProcessingModel
+        options: status.optionsForProvider(status.postProcessingProvider)
+        enabled: root.settingsEnabled && status.postProcessingEnabled && options.length > 0
         opacity: enabled ? 1 : 0.5
         foreground: root.foreground
         fontFamily: root.fontFamily
-        onChanged: function(value) {
-          root.updateSettings(["--model", value])
-        }
+        Accessible.name: "Post-processing model"
+        Accessible.role: Accessible.ComboBox
+        onChanged: function(value) { root.updateSettings(["--model", value]) }
       }
 
+      Text { width: parent.width; text: "API TOKEN"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1.1 }
       Text {
         width: parent.width
-        text: "API TOKEN"
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: true
-        font.letterSpacing: 1.1
-      }
-
-      Text {
-        visible: root.tokenConfigured
-        width: parent.width
-        text: "A token is configured for " + root.providerName + "."
+        visible: status.tokenConfigured
+        text: status.tokenSource === "environment"
+          ? "Token supplied by the environment. Change it in the service environment; Milevox cannot remove it."
+          : "A stored token is configured for " + root.providerName + "."
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -305,68 +189,59 @@ Panel {
       Row {
         width: parent.width
         spacing: Style.space(8)
-
         TextField {
           id: tokenField
           width: parent.width - saveTokenButton.width - parent.spacing
           password: true
-          placeholderText: root.tokenConfigured ? "Replace API token" : "Enter API token"
-          enabled: root.settingsEnabled
+          placeholderText: status.tokenConfigured ? "Replace API token" : "Enter API token"
+          enabled: root.settingsEnabled && status.pendingToken === ""
           opacity: enabled ? 1 : 0.5
           foreground: root.foreground
           accent: Color.accent
           font.family: root.fontFamily
-          onAccepted: root.saveToken()
-          Keys.onEscapePressed: {
-            text = ""
-            focus = false
-          }
+          Accessible.name: "API token for " + root.providerName
+          Accessible.role: Accessible.EditableText
+          onAccepted: status.saveToken(text)
+          Keys.onEscapePressed: { text = ""; focus = false }
         }
-
         Button {
           id: saveTokenButton
           anchors.verticalCenter: parent.verticalCenter
-          text: tokenProcess.running ? "Saving…" : "Save"
+          text: status.pendingToken !== "" ? "Saving…" : "Save"
           bordered: true
           focusable: true
-          enabled: root.settingsEnabled && tokenField.text.trim() !== ""
-          opacity: enabled ? 1 : 0.5
+          enabled: root.settingsEnabled && status.pendingToken === "" && tokenField.text.trim() !== ""
           foreground: root.foreground
           accent: Color.accent
           fontFamily: root.fontFamily
-          onClicked: root.saveToken()
+          Accessible.role: Accessible.Button
+          Accessible.name: "Save API token"
+          onClicked: status.saveToken(tokenField.text)
         }
       }
 
-      Text {
-        visible: !root.settingsAvailable
-        width: parent.width
-        text: "Restart Milevox to load post-processing controls."
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        wrapMode: Text.WordWrap
+      Button {
+        visible: status.tokenSource === "stored"
+        text: "Remove stored token"
+        bordered: true
+        focusable: true
+        enabled: root.settingsEnabled
+        foreground: root.foreground
+        accent: root.urgent
+        fontFamily: root.fontFamily
+        Accessible.role: Accessible.Button
+        Accessible.name: "Remove stored API token"
+        onClicked: status.removeToken()
       }
 
       Column {
-        visible: root.partialTranscript !== "" || root.transcript !== ""
+        visible: status.partialTranscript !== "" || status.transcript !== ""
         width: parent.width
         spacing: Style.space(5)
-
+        Text { width: parent.width; text: status.state === "idle" ? "LATEST TRANSCRIPT" : "LIVE TRANSCRIPT"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
         Text {
           width: parent.width
-          text: root.state === "idle" ? "LATEST TRANSCRIPT" : "LIVE TRANSCRIPT"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          font.letterSpacing: 1.1
-        }
-
-        Text {
-          width: parent.width
-          text: root.partialTranscript !== "" && root.state !== "idle"
-            ? root.partialTranscript : root.transcript
+          text: status.partialTranscript !== "" && status.state !== "idle" ? status.partialTranscript : status.transcript
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -376,14 +251,7 @@ Panel {
         }
       }
 
-      Text {
-        width: parent.width
-        text: "Left-click the bar icon to open this panel. Right-click it to toggle recording."
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        wrapMode: Text.WordWrap
-      }
+      Text { width: parent.width; text: "Left-click opens this panel; right-click toggles recording. Tab and Shift+Tab move focus; Enter or Space activates buttons. Escape clears a token field, closes while idle, or cancels active work."; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
     }
   }
 }

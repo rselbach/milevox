@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+
 post_install() {
   cat <<'EOF'
 
@@ -14,6 +16,15 @@ post_upgrade() {
 
 ==> Restart Milevox to use the upgraded binary:
       systemctl --user restart milevox.service
+
+EOF
+}
+
+pre_remove() {
+  cat <<'EOF'
+
+==> Disable Milevox before removing the package (as each desktop user):
+      milevox-teardown
 
 EOF
 }

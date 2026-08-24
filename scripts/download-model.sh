@@ -83,6 +83,7 @@ main() {
   local data_home
   local model_dir
 
+  (( $# <= 1 )) || fail "usage: $0 [model-directory]"
   command -v curl >/dev/null || fail "curl is required"
   command -v sha256sum >/dev/null || fail "sha256sum is required"
 

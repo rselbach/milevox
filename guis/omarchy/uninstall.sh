@@ -1,150 +1,58 @@
 #!/usr/bin/env bash
-
-# Remove the Milevox GUI for Omarchy without removing Milevox itself.
-
 set -euo pipefail
-
-readonly PLUGIN_ID="io.github.rselbach.milevox"
-readonly BINDINGS_BEGIN="-- milevox:begin"
-readonly BINDINGS_END="-- milevox:end"
-
-TEMP_FILES=()
-
-fail() {
-  echo "omarchy-gui uninstall: $*" >&2
-  exit 1
-}
-
-cleanup() {
-  local path
-
-  for path in "${TEMP_FILES[@]}"; do
-    [[ -n "${path}" ]] && rm -f -- "${path}"
-  done
-}
-
-usage() {
-  cat <<'EOF'
-Usage: ./guis/omarchy/uninstall.sh
-
-Remove the Milevox Omarchy plugin and its Hyprland keybindings. The Milevox
-CLI, daemon, configuration, credentials, logs, and models are preserved.
-EOF
-}
-
-configure_hyprland_instance() {
-  local instances_json
-  local instance_signature
-
-  [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]] || return
-
-  instances_json="$(hyprctl instances -j)" ||
-    fail "could not discover the running Hyprland instance"
-  instance_signature="$(
-    jq -r 'if length == 1 then .[0].instance else empty end' \
-      <<<"${instances_json}"
-  )"
-  [[ -n "${instance_signature}" ]] ||
-    fail "HYPRLAND_INSTANCE_SIGNATURE is unset;" \
-      "expected exactly one running Hyprland instance"
-  export HYPRLAND_INSTANCE_SIGNATURE="${instance_signature}"
-}
-
-remove_bindings() {
-  local bindings_file="$1"
-  local staged_file
-  local backup_file
-  local reload_output
-  local restore_output
-  local config_errors
-  local validation_error=""
-
-  [[ -f "${bindings_file}" ]] || return
-  configure_hyprland_instance
-  staged_file="$(mktemp)"
-  backup_file="$(mktemp)"
-  TEMP_FILES+=("${staged_file}" "${backup_file}")
-  cp -- "${bindings_file}" "${backup_file}"
-
-  awk \
-    -v begin="${BINDINGS_BEGIN}" \
-    -v end="${BINDINGS_END}" \
-    '$0 == begin { skipping = 1; next }
-     $0 == end { skipping = 0; next }
-     !skipping { print }' \
-    "${bindings_file}" >"${staged_file}"
-  cp -- "${staged_file}" "${bindings_file}"
-
-  config_errors=""
-  if ! reload_output="$(hyprctl reload 2>&1)"; then
-    validation_error="could not reload Hyprland: ${reload_output}"
-  elif ! config_errors="$(hyprctl configerrors 2>&1)"; then
-    validation_error="could not inspect Hyprland errors: ${config_errors}"
-  elif [[ -n "${config_errors}" ]]; then
-    validation_error="Hyprland rejected the bindings update: ${config_errors}"
-  fi
-
-  if [[ -n "${validation_error}" ]]; then
-    cp -- "${backup_file}" "${bindings_file}"
-    if ! restore_output="$(hyprctl reload 2>&1)"; then
-      echo "omarchy-gui uninstall: warning: restored ${bindings_file}," \
-        "but could not reload Hyprland: ${restore_output}" >&2
-    fi
-    fail "${validation_error}"
-  fi
-}
-
-remove_plugin() {
-  local plugin_dir="$1"
-
-  if omarchy-shell shell ping >/dev/null 2>&1; then
-    omarchy plugin disable "${PLUGIN_ID}" >/dev/null 2>&1 || true
-  fi
-
-  if [[ -L "${plugin_dir}" ]]; then
-    unlink -- "${plugin_dir}"
-  elif [[ -d "${plugin_dir}" ]]; then
-    rm -f -- "${plugin_dir}/Panel.qml" \
-      "${plugin_dir}/MilevoxOverlay.qml" \
-      "${plugin_dir}/Service.qml" "${plugin_dir}/manifest.json"
-    rmdir -- "${plugin_dir}" 2>/dev/null || true
-  fi
-
-  if omarchy-shell shell ping >/dev/null 2>&1; then
-    omarchy-shell shell rescanPlugins
-  fi
-}
+readonly PLUGIN_ID=io.github.rselbach.milevox
+# shellcheck source=guis/omarchy/bindings-common.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/bindings-common.sh"
+fail() { echo "omarchy-gui uninstall: $*" >&2; exit 1; }
+usage() { printf '%s\n' 'Usage: uninstall.sh [--help]' 'Failure-injection points: plugin-disabled, plugin-files, bindings, legacy-bindings.'; }
+fail_at() { [[ ${MILEVOX_FAIL_AT:-} != "$1" ]] || fail "injected failure after $1"; }
 
 main() {
-  local config_home
-  local plugin_dir
-
-  while (( $# > 0 )); do
-    case "$1" in
-      -h | --help)
-        usage
-        return
-        ;;
-      *)
-        fail "unknown option: $1"
-        ;;
-    esac
-  done
-
-  command -v hyprctl >/dev/null || fail "hyprctl is required"
-  command -v jq >/dev/null || fail "jq is required"
-  command -v omarchy >/dev/null || fail "omarchy is required"
-  command -v omarchy-shell >/dev/null || fail "omarchy-shell is required"
-
-  config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
-  plugin_dir="${config_home}/omarchy/plugins/${PLUGIN_ID}"
-
-  remove_plugin "${plugin_dir}"
-  remove_bindings "${HOME}/.config/hypr/bindings.lua"
-
-  echo "Milevox GUI for Omarchy removed."
-  echo "Milevox itself was preserved."
+  local config plugin bindings legacy work online=false prior_enabled=false plugin_existed=false committed=false
+  local stage legacy_stage='' base='' after
+  while (($#)); do case $1 in -h|--help) usage; return;; *) fail "unknown option: $1";; esac; done
+  ((EUID != 0)) || [[ ${MILEVOX_TEST_ALLOW_ROOT:-} == 1 ]] || fail "run this command without sudo"
+  config=${XDG_CONFIG_HOME:-$HOME/.config}; plugin=$config/omarchy/plugins/$PLUGIN_ID
+  bindings=$config/hypr/bindings.lua; legacy=$HOME/.config/hypr/bindings.lua
+  [[ ! -e $plugin || -d $plugin || -L $plugin ]] || fail "plugin path is not a directory or symlink: $plugin"
+  [[ ! -f $bindings ]] || validate_bindings_markers "$bindings" || fail "malformed marker block in $bindings"
+  if [[ $legacy != "$bindings" && -f $legacy ]]; then validate_bindings_markers "$legacy" || fail "malformed marker block in $legacy"; fi
+  if command -v hyprctl >/dev/null && command -v jq >/dev/null; then
+    if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then online=true
+    else
+      HYPRLAND_INSTANCE_SIGNATURE=$(hyprctl instances -j 2>/dev/null | jq -r 'if length == 1 then .[0].instance else empty end') || true
+      [[ -z $HYPRLAND_INSTANCE_SIGNATURE ]] || { export HYPRLAND_INSTANCE_SIGNATURE; online=true; }
+    fi
+  fi
+  [[ $online == false ]] || base=$(hyprctl configerrors 2>&1) || fail "could not read Hyprland config errors"
+  work=$(mktemp -d); [[ ! -e $plugin && ! -L $plugin ]] || { plugin_existed=true; cp -a -- "$plugin" "$work/plugin"; }
+  [[ ! -f $bindings ]] || cp -p -- "$bindings" "$work/bindings"
+  [[ $legacy == "$bindings" || ! -f $legacy ]] || cp -p -- "$legacy" "$work/legacy"
+  if command -v omarchy >/dev/null && omarchy plugin list --json 2>/dev/null | jq -e --arg id "$PLUGIN_ID" '.[]|select(.id==$id and .enabled)' >/dev/null; then prior_enabled=true; fi
+  rollback() {
+    [[ $committed == false ]] || return 0
+    if [[ -f $work/bindings ]]; then stage=$(stage_for "$bindings"); cp -p "$work/bindings" "$stage"; atomic_replace "$stage" "$bindings" || true; fi
+    if [[ -f $work/legacy ]]; then legacy_stage=$(stage_for "$legacy"); cp -p "$work/legacy" "$legacy_stage"; atomic_replace "$legacy_stage" "$legacy" || true; fi
+    rm -rf -- "$plugin"; [[ $plugin_existed == false ]] || cp -a -- "$work/plugin" "$plugin"
+    if [[ $online == true && $prior_enabled == true ]]; then omarchy plugin enable "$PLUGIN_ID" --section right >/dev/null 2>&1 || true; fi
+    [[ $online == false ]] || hyprctl reload >/dev/null 2>&1 || true
+    rm -rf -- "$work"
+  }
+  trap rollback EXIT
+  if [[ $online == true && $prior_enabled == true ]]; then omarchy plugin disable "$PLUGIN_ID" >/dev/null; fail_at plugin-disabled; fi
+  if [[ -L $plugin ]]; then unlink -- "$plugin"; elif [[ -d $plugin ]]; then
+    rm -f -- "$plugin/manifest.json" "$plugin/Panel.qml" "$plugin/MilevoxOverlay.qml" "$plugin/MilevoxStatus.qml" "$plugin/Service.qml"
+    rmdir -- "$plugin" 2>/dev/null || true
+  fi
+  fail_at plugin-files
+  if [[ -f $bindings ]]; then stage=$(stage_for "$bindings"); strip_bindings_block "$bindings" > "$stage"; atomic_replace "$stage" "$bindings"; fail_at bindings; fi
+  if [[ $legacy != "$bindings" && -f $legacy ]]; then legacy_stage=$(stage_for "$legacy"); strip_bindings_block "$legacy" > "$legacy_stage"; atomic_replace "$legacy_stage" "$legacy"; fail_at legacy-bindings; fi
+  if [[ $online == true ]]; then
+    hyprctl reload >/dev/null || fail "could not reload Hyprland"
+    after=$(hyprctl configerrors 2>&1) || fail "could not validate Hyprland configuration"
+    [[ -z $(new_config_errors "$base" "$after") ]] || fail "Hyprland reported new configuration errors"
+    if command -v omarchy-shell >/dev/null; then omarchy-shell shell rescanPlugins >/dev/null || true; fi
+  else echo "Hyprland/Omarchy is offline; log out and back in to apply removal."; fi
+  committed=true; trap - EXIT; rm -rf -- "$work"; echo "Milevox GUI for Omarchy removed."
 }
-
-trap cleanup EXIT
 main "$@"

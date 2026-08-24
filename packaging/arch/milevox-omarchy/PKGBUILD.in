@@ -32,10 +32,12 @@ package() {
     "${pkgdir}/usr/bin/milevox-omarchy"
   install -d "${libexec_dir}"
   install -m755 "${source_dir}/install.sh" \
-    "${source_dir}/uninstall.sh" "${libexec_dir}/"
+    "${source_dir}/uninstall.sh" "${source_dir}/bindings-common.sh" \
+    "${libexec_dir}/"
   install -m644 "${source_dir}/manifest.json" \
     "${source_dir}/Panel.qml" \
-    "${source_dir}/MilevoxOverlay.qml" "${libexec_dir}/"
+    "${source_dir}/MilevoxOverlay.qml" \
+    "${source_dir}/MilevoxStatus.qml" "${libexec_dir}/"
 
   install -Dm644 "${source_dir}/README.md" \
     "${pkgdir}/usr/share/doc/${pkgname}/README.md"

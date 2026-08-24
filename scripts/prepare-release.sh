@@ -3,6 +3,8 @@
 # Update every file that stores the Milevox release version.
 
 set -euo pipefail
+# shellcheck source=scripts/lib-release.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib-release.sh"
 
 TEMP_DIR=""
 
@@ -78,7 +80,6 @@ render_cargo_lock() {
 
 main() {
   local version="${1:-}"
-  local version_pattern
   local repo_dir
   local staged_manifest
   local staged_lock
@@ -91,9 +92,7 @@ main() {
     usage
     exit 1
   fi
-  version_pattern='^[0-9]+\.[0-9]+\.[0-9]+'
-  version_pattern+='(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-  [[ "${version}" =~ ${version_pattern} ]] ||
+  validate_version "${version}" ||
     fail "invalid version: ${version}"
 
   require_command awk

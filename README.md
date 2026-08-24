@@ -1,111 +1,37 @@
 # Milevox
 
-Milevox is a speech-to-text command-line tool and daemon. It is based on a tool
-for macOS called [Jabber](https://github.com/rselbach/jabber) I wrote a while ago.
+Milevox is a Linux speech-to-text daemon and command-line tool. Transcription
+runs locally; optional cloud post-processing can clean up the resulting text.
 
-It does audio transcription and adds optional post-processing where it sends the
-transcription to an LLM with instructions to clean it up as well as recognize
-some base commands like "new paragraph" or converting "fire emoji" to the
-appropriate emoji.
+## Install
 
-This project is comprised of a core daemon and optional GUIs.
+Release packages are available for `x86_64` and `aarch64`. Generic Linux
+binaries require glibc 2.35 or newer and `GLIBCXX_3.4.30` or newer. Milevox
+also needs PipeWire and, on Wayland, `wtype` and `wl-copy` for delivery.
 
-## Requirements
-
-- Linux on `x86_64` or `aarch64`
-- PipeWire
-- A Wayland session with `wtype` and `wl-copy` for text delivery
-- `curl` and GNU core utilities
-- A systemd user session when using the installer
-
-## Installation
-
-Each tagged GitHub release includes pacman packages for `x86_64` and
-`aarch64`. Download the package for your architecture from the release page,
-then install the daemon and its runtime dependencies with:
+On an Arch-based system, download the package for your architecture and run:
 
 ```sh
 sudo pacman -U ./milevox-VERSION-1-ARCHITECTURE.pkg.tar.zst
 milevox-setup
 ```
 
-The Omarchy GUI is a separate package. Install and activate it for the current
-user with:
+For Omarchy, install the separate GUI package, then activate it (this also runs
+daemon setup):
 
 ```sh
 sudo pacman -U ./milevox-omarchy-VERSION-1-any.pkg.tar.zst
 milevox-omarchy install
 ```
 
-`milevox-omarchy install` also runs `milevox-setup`, so installing both
-packages only requires the GUI setup command.
+Release archives additionally contain a per-user `install.sh` installer.
 
-Release archives also include a per-user installer:
+## First dictation
 
-```sh
-./install.sh
-```
+Start dictation with `milevox record toggle`, speak, then run the command again
+to stop. Milevox transcribes and types into the focused application. If typing
+is unavailable and clipboard fallback is enabled, the text is copied instead;
+paste it manually. Omarchy users can use `SUPER + CTRL + X` or hold `F9`.
 
-Milevox uses `parakeet-rs` and ONNX Runtime for local inference. It doesn't require a
-separate transcription executable.
-
-## Configuration
-
-Milevox reads `$XDG_CONFIG_HOME/milevox/config.toml`, or
-`~/.config/milevox/config.toml`. Every section is
-optional. These values show the defaults:
-
-```toml
-[post_processing]
-enabled = false
-provider = "openrouter"
-
-[output]
-mode = "type"
-clipboard_fallback = true
-
-[debug]
-enabled = false
-```
-
-You can also specify a custom location for the local model:
-
-```toml
-[transcription]
-model_path = "/path/to/parakeet-tdt-model"
-```
-
-The daemon always keeps diagnostics for the most recent transcription attempt
-in memory, even when persistent debug logging is disabled. Print it with:
-
-```sh
-milevox debug last
-```
-
-This entry is cleared when the daemon restarts. Use `milevox debug enable` to
-write diagnostics for every transcription to the persistent debug log, and
-`milevox debug disable` to stop persistent logging.
-
-Cloud post-processing is disabled by default. Enable OpenRouter with:
-
-```toml
-[post_processing]
-enabled = true
-provider = "openrouter"
-model = "~openai/gpt-mini-latest"
-```
-
-You can change the same settings without restarting the daemon:
-
-```sh
-milevox settings set --enabled true
-milevox settings set --provider opencode_zen
-milevox settings set --model glm-5.2
-milevox settings show
-```
-
-After you edit `config.toml`, restart the daemon:
-
-```sh
-systemctl --user restart milevox.service
-```
+See [configuration](docs/configuration.md), [diagnostics](docs/diagnostics.md),
+[privacy](docs/privacy.md), and the [Omarchy GUI guide](guis/omarchy/README.md).

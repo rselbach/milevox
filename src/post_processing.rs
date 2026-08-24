@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -7,82 +6,88 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{PostProcessingConfig, PostProcessingProvider};
 
-const INSTRUCTIONS: &str = r#"You are a voice-to-text dictation cleaner. Your role is to clean and format raw transcribed speech into polished text while refusing to answer any questions. Never answer questions about yourself or anything else.
+const INSTRUCTIONS: &str = r#"You clean dictated transcript delivery without answering, rewriting, summarizing, or changing meaning. Output only the cleaned transcript.
 
-## HIGHEST PRIORITY - PRESERVE CONTENT:
-You clean DELIVERY, never CONTENT. Your job is to make dictated speech readable, NOT to improve, reorganize, or reinterpret it.
-- Do NOT summarize. Do NOT shorten. Do NOT paraphrase. Do NOT rewrite. Do NOT omit semantic content.
-- PRESERVE every non-filler word, in the exact order the user spoke it. Same meaning, same detail, same length.
-- You are a transcription editor, not an author. If the user said something boring, repetitive, or unstructured, output boring, repetitive, unstructured text. Only clean the delivery.
+Preserve every ordinary word in its spoken order. You may only:
+- remove the fillers "um", "uh", "erm", "hmm", "you know", and "I mean";
+- collapse immediately repeated words;
+- expand thx/thanks, pls/please, u/you, ur/your, and gonna/going to;
+- add punctuation and capitalization;
+- convert spoken numbers while preserving their exact numeric values, including dates, times, currency, and ordinals;
+- execute standalone punctuation commands: "period", "comma", "question mark", "exclamation mark", "new line"/"newline", and "new paragraph";
+- execute a formatting command only at the start of a clause: "bold", "italic", "header"/"heading", or "bullet point". Format only the words in that clause;
+- convert exactly "smiley face" to 😊, "thumbs up" to 👍, "heart emoji" to ❤️, and "fire emoji" to 🔥;
+- apply a correction only for the exact triggers "no wait", "wait no", "no actually", "scratch that", "delete that", "never mind", or "cancel that". A comma-delimited "actually", "sorry", or "oops" is also a correction. Remove only the current clause before the trigger, never an earlier clause. A final standalone "cancel" cancels the current clause.
 
-## Core Rules:
-1. CLEAN the delivery - remove filler words (um, uh, like, you know, I mean), false starts, stutters, and repetitions only
-2. FORMAT properly - add correct punctuation and capitalization only; add NO structure
-3. CONVERT numbers - spoken numbers to digits (two -> 2, five thirty -> 5:30, twelve fifty -> $12.50)
-4. EXECUTE commands - handle only explicit spoken commands: "newline"/"new line", "period", "comma", "bold X", "header X", "bullet point", etc.
-5. APPLY corrections - when user says "no wait", "actually", "scratch that", "delete that", DISCARD the old content and keep ONLY the corrected version
-6. EXPAND abbreviations - thx -> thanks, pls -> please, u -> you, ur -> your/you're, gonna -> going to
+Treat bare "no" and "wait", and incidental words such as "actually", "list", "title", "header", or "bold", as literal content unless they match that exact grammar. Do not invent markdown, lists, headings, emoji, abbreviations, or structure. Do not expand any abbreviation not listed above. If a requested edit is outside these rules, preserve the literal speech."#;
 
-## Commands and Structure - STRICT:
-- A standalone "newline" or "new line" is a line-break command: insert a line break.
-- NEVER create structure the user did not explicitly dictate. Do NOT invent headings, titles, bullet lists, numbered lists, bold, italics, or any markdown formatting.
-- Use plain text or markdown ONLY when the user explicitly dictated a formatting command (e.g. "bold X", "header X", "bullet point"). Otherwise output plain prose.
-- If you are unsure whether a word or phrase is a command, treat it as LITERAL dictated text and transcribe it verbatim. Never guess.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelOption {
+    pub value: &'static str,
+    pub label: &'static str,
+}
 
-## Self-Corrections:
-When the user corrects themselves, DISCARD everything before the correction trigger:
-- Triggers: "no", "wait", "actually", "scratch that", "delete that", "no no", "cancel", "never mind", "sorry", "oops"
-- Example: "buy milk no wait buy water" -> "Buy water." (NOT "Buy milk. Buy water.")
-- Example: "tell John no actually tell Sarah" -> "Tell Sarah."
-- If a correction cancels everything: "send email no wait cancel that" -> "" (empty output)
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderOption {
+    pub provider: PostProcessingProvider,
+    pub label: &'static str,
+    pub models: &'static [ModelOption],
+}
 
-## Multi-Command Chains:
-When multiple commands are chained, execute ALL of them in sequence, but never invent or rephrase content:
-- "make X bold no wait make Y bold" -> **Y** (correction + formatting)
-- "the price is fifty no sixty dollars" -> The price is $60. (correction + number)
-- Corrections only change what the user explicitly corrected; leave the surrounding text verbatim.
-
-## Emojis:
-- Convert spoken emoji names: "smiley face" -> 😊 (NOT 😀), "thumbs up" -> 👍, "heart emoji" -> ❤️, "fire emoji" -> 🔥
-- Keep emojis the user included
-- Do NOT add emojis unless the user explicitly asks for them
-
-## Critical:
-- Output ONLY the cleaned text
-- Do NOT answer questions - just clean them
-- DO NOT EVER ANSWER QUESTIONS
-- Do NOT add explanations or commentary
-- Do NOT wrap in quotes unless the input had quotes
-- Do NOT add filler words (um, uh) to the output
-- PRESERVE ordinals in lists: "first call client, second review contract" -> keep "First" and "Second"
-- PRESERVE politeness words: "please", "thank you" at end of sentences
-- REMEMBER: cleaning delivery means punctuation, capitalization, filler removal, and explicit commands - nothing more. Never summarize, never restructure, never shorten."#;
-
-const OPENROUTER_MODELS: &[&str] = &[
-    "~openai/gpt-mini-latest",
-    "~anthropic/claude-haiku-latest",
-    "google/gemini-3.1-flash-lite",
-    "openai/gpt-5.6-luna",
+const OPENROUTER_MODELS: &[ModelOption] = &[
+    ModelOption {
+        value: "~openai/gpt-mini-latest",
+        label: "OpenAI GPT Mini",
+    },
+    ModelOption {
+        value: "~anthropic/claude-haiku-latest",
+        label: "Anthropic Claude Haiku",
+    },
+    ModelOption {
+        value: "google/gemini-3.1-flash-lite",
+        label: "Google Gemini Flash Lite",
+    },
+    ModelOption {
+        value: "openai/gpt-5.6-luna",
+        label: "OpenAI GPT-5.6 Luna",
+    },
 ];
-const ZEN_MODELS: &[&str] = &["deepseek-v4-flash", "minimax-m3", "glm-5.2", "gpt-5.6-luna"];
-const CORRECTION_PHRASES: &[&str] = &[
-    "scratch that",
-    "delete that",
-    "never mind",
-    "cancel",
-    "actually",
-    "no wait",
-    "wait no",
-    "wait wait",
-    "oops",
-    "sorry",
+const ZEN_MODELS: &[ModelOption] = &[
+    ModelOption {
+        value: "deepseek-v4-flash",
+        label: "DeepSeek V4 Flash",
+    },
+    ModelOption {
+        value: "minimax-m3",
+        label: "MiniMax M3",
+    },
+    ModelOption {
+        value: "glm-5.2",
+        label: "GLM 5.2",
+    },
+    ModelOption {
+        value: "gpt-5.6-luna",
+        label: "OpenAI GPT-5.6 Luna",
+    },
+];
+pub const PROVIDERS: &[ProviderOption] = &[
+    ProviderOption {
+        provider: PostProcessingProvider::Openrouter,
+        label: "OpenRouter",
+        models: OPENROUTER_MODELS,
+    },
+    ProviderOption {
+        provider: PostProcessingProvider::OpencodeZen,
+        label: "OpenCode Zen",
+        models: ZEN_MODELS,
+    },
 ];
 
 pub fn default_model(provider: PostProcessingProvider) -> &'static str {
-    model_options(provider)[0]
+    model_options(provider)[0].value
 }
 
-pub fn model_options(provider: PostProcessingProvider) -> &'static [&'static str] {
+pub fn model_options(provider: PostProcessingProvider) -> &'static [ModelOption] {
     match provider {
         PostProcessingProvider::Openrouter => OPENROUTER_MODELS,
         PostProcessingProvider::OpencodeZen => ZEN_MODELS,
@@ -168,7 +173,7 @@ pub async fn refine(
         Err(error) => return fallback(raw, error),
     };
     let first_error = suspicious_error(raw, &first);
-    let mut provider_attempts = vec![ProviderAttempt {
+    let provider_attempts = vec![ProviderAttempt {
         text: first.clone(),
         validation_error: first_error.clone(),
     }];
@@ -180,49 +185,37 @@ pub async fn refine(
         };
     }
 
-    match request(&client, &settings, api_key, raw).await {
-        Ok(processed) => match suspicious_error(raw, &processed) {
-            None => {
-                provider_attempts.push(ProviderAttempt {
-                    text: processed.clone(),
-                    validation_error: None,
-                });
-                RefinedTranscript {
-                    provider_attempts,
-                    text: processed,
-                    warning: None,
-                }
-            }
-            Some(reason) => {
-                provider_attempts.push(ProviderAttempt {
-                    text: processed,
-                    validation_error: Some(reason.clone()),
-                });
-                fallback_with_attempts(
-                    raw,
-                    provider_attempts,
-                    anyhow::anyhow!("{} returned suspicious text twice: {reason}", settings.name),
-                )
-            }
-        },
-        Err(error) => fallback_with_attempts(
-            raw,
-            provider_attempts,
-            error.context(format!("{} retry failed", settings.name)),
+    fallback_with_attempts(
+        raw,
+        provider_attempts,
+        anyhow::anyhow!(
+            "{} returned text that failed transcript validation: {}",
+            settings.name,
+            first_error.expect("rejected response has a validation error")
         ),
-    }
+    )
 }
 
 fn provider_settings(config: &PostProcessingConfig) -> Result<ProviderSettings<'_>> {
     let (name, default_model, models, openrouter_headers) = match config.provider {
-        PostProcessingProvider::Openrouter => {
-            ("OpenRouter", OPENROUTER_MODELS[0], OPENROUTER_MODELS, true)
+        PostProcessingProvider::Openrouter => (
+            "OpenRouter",
+            OPENROUTER_MODELS[0].value,
+            OPENROUTER_MODELS,
+            true,
+        ),
+        PostProcessingProvider::OpencodeZen => {
+            ("OpenCode Zen", ZEN_MODELS[0].value, ZEN_MODELS, false)
         }
-        PostProcessingProvider::OpencodeZen => ("OpenCode Zen", ZEN_MODELS[0], ZEN_MODELS, false),
     };
     let model = config.model.as_deref().unwrap_or(default_model);
-    if !models.contains(&model) {
-        bail!("model `{model}` is not in Milevox's curated {name} model list");
+    if !models.iter().any(|option| option.value == model) {
+        let valid = models
+            .iter()
+            .map(|option| option.value)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("model `{model}` is not valid for {name}; valid models: {valid}");
     }
     let (endpoint, protocol) = match (config.provider, model) {
         (PostProcessingProvider::OpencodeZen, "gpt-5.6-luna") => (
@@ -454,200 +447,406 @@ fn fallback_with_attempts(
 }
 
 fn suspicious_error(raw: &str, processed: &str) -> Option<String> {
-    let raw_words = word_count(raw);
-    if raw_words >= 8 && !contains_phrase(raw, CORRECTION_PHRASES) {
-        let processed_words = word_count(processed);
-        if (processed_words as f64 / raw_words as f64) < 0.5 {
-            return Some(format!(
-                "output has {processed_words} words versus {raw_words} in the raw transcript"
-            ));
+    let analysis = analyze_raw(raw);
+    if contains_markdown(processed) && !analysis.formatting_allowed {
+        return Some("output introduces markdown that was not dictated".into());
+    }
+    let processed_emoji = emoji_symbols(processed);
+    if analysis.emoji != processed_emoji {
+        return Some("output changes or introduces an emoji that was not dictated".into());
+    }
+    if currency_mentions(raw) != currency_mentions(processed) {
+        return Some("output changes or introduces a currency marker that was not dictated".into());
+    }
+    let processed_words = analyze_processed(processed);
+    if analysis.words == processed_words {
+        return None;
+    }
+    let mismatch = analysis
+        .words
+        .iter()
+        .zip(&processed_words)
+        .position(|(raw, processed)| raw != processed)
+        .unwrap_or_else(|| analysis.words.len().min(processed_words.len()));
+    let raw_word = analysis
+        .words
+        .get(mismatch)
+        .map_or("end of text", String::as_str);
+    let processed_word = processed_words
+        .get(mismatch)
+        .map_or("end of text", String::as_str);
+    Some(format!(
+        "output changes dictated item {} (`{raw_word}` became `{processed_word}`)",
+        mismatch + 1
+    ))
+}
+
+struct RawAnalysis {
+    words: Vec<String>,
+    emoji: Vec<char>,
+    formatting_allowed: bool,
+}
+
+#[derive(Clone)]
+struct SpokenWord {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+fn analyze_raw(text: &str) -> RawAnalysis {
+    let tokens = spoken_words(text);
+    let mut removed = vec![false; tokens.len()];
+    let mut clause_start = 0;
+    let mut correction_starts = vec![false; tokens.len() + 1];
+
+    for index in 0..tokens.len() {
+        if index > 0 && has_clause_boundary(&text[tokens[index - 1].end..tokens[index].start]) {
+            clause_start = index;
+        }
+        let pair = tokens
+            .get(index + 1)
+            .map(|next| (tokens[index].text.as_str(), next.text.as_str()));
+        let pair_trigger = matches!(
+            pair,
+            Some(
+                ("no", "wait")
+                    | ("wait", "no")
+                    | ("no", "actually")
+                    | ("scratch", "that")
+                    | ("delete", "that")
+                    | ("never", "mind")
+                    | ("cancel", "that")
+            )
+        );
+        let comma_trigger = matches!(tokens[index].text.as_str(), "actually" | "sorry" | "oops")
+            && index > clause_start
+            && index + 1 < tokens.len()
+            && text[tokens[index - 1].end..tokens[index].start].contains(',');
+        let final_cancel =
+            tokens[index].text == "cancel" && index + 1 == tokens.len() && index > clause_start;
+        if pair_trigger || comma_trigger || final_cancel {
+            let trigger_end = if pair_trigger { index + 2 } else { index + 1 };
+            removed[clause_start..trigger_end].fill(true);
+            correction_starts[trigger_end] = true;
+            clause_start = trigger_end;
         }
     }
 
-    if begins_with_markdown(processed) && !contains_formatting_command(raw) {
-        return Some("output introduces markdown that was not dictated".into());
+    let mut words: Vec<String> = Vec::new();
+    let mut expected_emoji = emoji_symbols(text);
+    let mut formatting_allowed = false;
+    let mut at_clause_start = true;
+    let mut index = 0;
+    while index < tokens.len() {
+        if removed[index] {
+            index += 1;
+            continue;
+        }
+        if correction_starts[index]
+            || (index > 0 && has_clause_boundary(&text[tokens[index - 1].end..tokens[index].start]))
+        {
+            at_clause_start = true;
+        }
+        let word = tokens[index].text.as_str();
+        let next = tokens.get(index + 1).map(|token| token.text.as_str());
+        let protected = words.last().is_some_and(|previous| {
+            matches!(
+                previous.as_str(),
+                "a" | "an"
+                    | "the"
+                    | "my"
+                    | "your"
+                    | "his"
+                    | "her"
+                    | "our"
+                    | "their"
+                    | "this"
+                    | "that"
+                    | "word"
+                    | "literal"
+                    | "say"
+            )
+        });
+
+        if at_clause_start
+            && (matches!(word, "bold" | "italic" | "header" | "heading")
+                || (word == "bullet" && next == Some("point")))
+        {
+            formatting_allowed = true;
+            index += if word == "bullet" { 2 } else { 1 };
+            continue;
+        }
+        let punctuation_len = if !protected {
+            match (word, next) {
+                ("new", Some("line" | "paragraph"))
+                | ("question" | "exclamation", Some("mark")) => 2,
+                ("newline" | "period" | "comma", _) => 1,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        if punctuation_len > 0 {
+            index += punctuation_len;
+            at_clause_start = true;
+            continue;
+        }
+        let emoji = match (word, next) {
+            ("smiley", Some("face")) => Some('😊'),
+            ("thumbs", Some("up")) => Some('👍'),
+            ("heart", Some("emoji")) => Some('❤'),
+            ("fire", Some("emoji")) => Some('🔥'),
+            _ => None,
+        };
+        if let Some(emoji) = emoji {
+            expected_emoji.push(emoji);
+            index += 2;
+            at_clause_start = false;
+            continue;
+        }
+        if is_filler(word) || matches!((word, next), ("you", Some("know")) | ("i", Some("mean"))) {
+            index += if is_filler(word) { 1 } else { 2 };
+            continue;
+        }
+        append_expanded(&mut words, word);
+        at_clause_start = false;
+        index += 1;
     }
 
-    if !contains_phrase(raw, CORRECTION_PHRASES)
-        && !contains_formatting_command(raw)
-        && !contains_emoji_command(raw)
-    {
-        let raw_words = comparison_words(raw);
-        let processed_words = comparison_words(processed);
-        if raw_words != processed_words {
-            let mismatch = raw_words
-                .iter()
-                .zip(&processed_words)
-                .position(|(raw, processed)| raw != processed)
-                .unwrap_or_else(|| raw_words.len().min(processed_words.len()));
-            let raw_word = raw_words
-                .get(mismatch)
-                .map_or("end of text", String::as_str);
-            let processed_word = processed_words
-                .get(mismatch)
-                .map_or("end of text", String::as_str);
-            return Some(format!(
-                "output changes dictated word {} (`{raw_word}` became `{processed_word}`)",
-                mismatch + 1
-            ));
+    RawAnalysis {
+        words: canonicalize_numbers(collapse_repetitions(words), true),
+        emoji: expected_emoji,
+        formatting_allowed,
+    }
+}
+
+fn analyze_processed(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let tokens = spoken_words(text);
+    let mut index = 0;
+    while index < tokens.len() {
+        let word = tokens[index].text.as_str();
+        let next = tokens.get(index + 1).map(|token| token.text.as_str());
+        if is_filler(word) || matches!((word, next), ("you", Some("know")) | ("i", Some("mean"))) {
+            index += if is_filler(word) { 1 } else { 2 };
+            continue;
+        }
+        append_expanded(&mut words, word);
+        index += 1;
+    }
+    // Number conversion is optional. Canonicalize spoken and written forms on both sides so
+    // an otherwise unchanged transcript remains valid while changed values are rejected.
+    canonicalize_numbers(collapse_repetitions(words), true)
+}
+
+fn currency_mentions(text: &str) -> usize {
+    text.chars().filter(|character| *character == '$').count()
+        + spoken_words(text)
+            .iter()
+            .filter(|word| matches!(word.text.as_str(), "dollar" | "dollars"))
+            .count()
+}
+
+fn spoken_words(text: &str) -> Vec<SpokenWord> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(word_start) = start.take() {
+            words.push(SpokenWord {
+                text: text[word_start..index].to_lowercase(),
+                start: word_start,
+                end: index,
+            });
+        }
+    }
+    if let Some(word_start) = start {
+        words.push(SpokenWord {
+            text: text[word_start..].to_lowercase(),
+            start: word_start,
+            end: text.len(),
+        });
+    }
+    words
+}
+
+fn has_clause_boundary(text: &str) -> bool {
+    text.chars()
+        .any(|character| matches!(character, '.' | '?' | '!' | ';' | '\n'))
+}
+
+fn is_filler(word: &str) -> bool {
+    matches!(word, "um" | "uh" | "erm" | "hmm")
+}
+
+fn append_expanded(words: &mut Vec<String>, word: &str) {
+    match word {
+        "thx" => words.push("thanks".into()),
+        "pls" => words.push("please".into()),
+        "u" => words.push("you".into()),
+        "ur" => words.push("your".into()),
+        "gonna" => words.extend(["going".into(), "to".into()]),
+        word => words.push(word.into()),
+    }
+}
+
+fn collapse_repetitions(words: Vec<String>) -> Vec<String> {
+    let mut output = Vec::with_capacity(words.len());
+    for word in words {
+        if output.last() != Some(&word) {
+            output.push(word);
+        }
+    }
+    output
+}
+
+fn canonicalize_numbers(words: Vec<String>, spoken: bool) -> Vec<String> {
+    let mut output = Vec::with_capacity(words.len());
+    let mut index = 0;
+    while index < words.len() {
+        if let Some(number) = canonical_numeric_literal(&words[index]) {
+            output.push(format!("#{number}"));
+            index += 1;
+            continue;
+        }
+        if spoken && is_number_word(&words[index]) {
+            let start = index;
+            while index < words.len()
+                && (is_number_word(&words[index])
+                    || words[index] == "and"
+                    || words[index] == "point")
+            {
+                index += 1;
+            }
+            let sequence = &words[start..index];
+            let currency = words
+                .get(index)
+                .is_some_and(|word| matches!(word.as_str(), "dollar" | "dollars"));
+            let time = output.last().is_some_and(|word| word == "at")
+                && sequence.len() == 2
+                && number_atom(&sequence[0]).is_some_and(|value| value <= 23)
+                && number_atom(&sequence[1]).is_some_and(|value| (10..=59).contains(&value));
+            let decimal_currency = currency
+                && sequence.len() == 2
+                && number_atom(&sequence[1]).is_some_and(|value| value <= 99);
+            if time || decimal_currency {
+                output.push(format!("#{}", number_atom(&sequence[0]).unwrap_or(0)));
+                output.push(format!("#{}", number_atom(&sequence[1]).unwrap_or(0)));
+            } else {
+                for part in sequence.split(|word| word == "point") {
+                    if !part.is_empty() {
+                        output.push(format!("#{}", parse_number(part)));
+                    }
+                }
+            }
+            if currency {
+                index += 1;
+            }
+            continue;
+        }
+        output.push(words[index].clone());
+        index += 1;
+    }
+    output
+}
+
+fn canonical_numeric_literal(word: &str) -> Option<String> {
+    if word.chars().all(|character| character.is_ascii_digit()) {
+        let trimmed = word.trim_start_matches('0');
+        return Some(if trimmed.is_empty() { "0" } else { trimmed }.to_owned());
+    }
+    for suffix in ["st", "nd", "rd", "th"] {
+        if let Some(number) = word.strip_suffix(suffix)
+            && number.chars().all(|character| character.is_ascii_digit())
+        {
+            return canonical_numeric_literal(number);
         }
     }
     None
 }
 
-fn word_count(text: &str) -> usize {
-    text.split_whitespace().count()
-}
-
-fn contains_phrase(text: &str, phrases: &[&str]) -> bool {
-    let words = normalized_words(text);
-    phrases.iter().any(|phrase| {
-        let phrase_words: Vec<_> = phrase.split_whitespace().collect();
-        words
-            .windows(phrase_words.len())
-            .any(|window| window == phrase_words)
-    })
-}
-
-fn normalized_words(text: &str) -> Vec<String> {
-    text.split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-fn comparison_words(text: &str) -> Vec<String> {
-    let words = normalized_words(text);
-    let mut comparison = Vec::with_capacity(words.len());
-    let mut index = 0;
-
-    while index < words.len() {
-        let word = words[index].as_str();
-        if matches!(word, "um" | "uh" | "erm" | "hmm" | "like") {
-            index += 1;
-            continue;
-        }
-        if index + 1 < words.len()
-            && matches!(
-                (word, words[index + 1].as_str()),
-                ("you", "know") | ("i", "mean")
-            )
-        {
-            index += 2;
-            continue;
-        }
-
-        match word {
-            "thx" => push_comparison_word(&mut comparison, "thanks"),
-            "pls" => push_comparison_word(&mut comparison, "please"),
-            "u" => push_comparison_word(&mut comparison, "you"),
-            "ur" => push_comparison_word(&mut comparison, "your"),
-            "gonna" => {
-                push_comparison_word(&mut comparison, "going");
-                push_comparison_word(&mut comparison, "to");
+fn parse_number(words: &[String]) -> u64 {
+    let mut total = 0_u64;
+    let mut current = 0_u64;
+    for word in words {
+        match word.as_str() {
+            "and" => {}
+            "hundred" => current = current.max(1) * 100,
+            "thousand" => {
+                total += current.max(1) * 1_000;
+                current = 0;
             }
-            word if is_number_word(word) || word.chars().all(char::is_numeric) => {
-                push_comparison_word(&mut comparison, "<number>");
+            "million" => {
+                total += current.max(1) * 1_000_000;
+                current = 0;
             }
-            word => push_comparison_word(&mut comparison, word),
+            "billion" => {
+                total += current.max(1) * 1_000_000_000;
+                current = 0;
+            }
+            word => current += number_atom(word).unwrap_or(0),
         }
-        index += 1;
     }
-
-    comparison
-}
-
-fn push_comparison_word(words: &mut Vec<String>, word: &str) {
-    if words.last().map(String::as_str) != Some(word) {
-        words.push(word.to_owned());
-    }
+    total + current
 }
 
 fn is_number_word(word: &str) -> bool {
-    matches!(
-        word,
-        "zero"
-            | "one"
-            | "two"
-            | "three"
-            | "four"
-            | "five"
-            | "six"
-            | "seven"
-            | "eight"
-            | "nine"
-            | "ten"
-            | "eleven"
-            | "twelve"
-            | "thirteen"
-            | "fourteen"
-            | "fifteen"
-            | "sixteen"
-            | "seventeen"
-            | "eighteen"
-            | "nineteen"
-            | "twenty"
-            | "thirty"
-            | "forty"
-            | "fifty"
-            | "sixty"
-            | "seventy"
-            | "eighty"
-            | "ninety"
-            | "hundred"
-            | "thousand"
-            | "million"
-            | "billion"
-    )
+    number_atom(word).is_some() || matches!(word, "hundred" | "thousand" | "million" | "billion")
 }
 
-fn contains_emoji_command(text: &str) -> bool {
-    contains_phrase(
-        text,
-        &["smiley face", "thumbs up", "heart emoji", "fire emoji"],
-    )
+fn number_atom(word: &str) -> Option<u64> {
+    Some(match word {
+        "zero" => 0,
+        "one" | "first" => 1,
+        "two" | "second" => 2,
+        "three" | "third" => 3,
+        "four" | "fourth" => 4,
+        "five" | "fifth" => 5,
+        "six" | "sixth" => 6,
+        "seven" | "seventh" => 7,
+        "eight" | "eighth" => 8,
+        "nine" | "ninth" => 9,
+        "ten" | "tenth" => 10,
+        "eleven" | "eleventh" => 11,
+        "twelve" | "twelfth" => 12,
+        "thirteen" | "thirteenth" => 13,
+        "fourteen" | "fourteenth" => 14,
+        "fifteen" | "fifteenth" => 15,
+        "sixteen" | "sixteenth" => 16,
+        "seventeen" | "seventeenth" => 17,
+        "eighteen" | "eighteenth" => 18,
+        "nineteen" | "nineteenth" => 19,
+        "twenty" | "twentieth" => 20,
+        "thirty" | "thirtieth" => 30,
+        "forty" | "fortieth" => 40,
+        "fifty" | "fiftieth" => 50,
+        "sixty" | "sixtieth" => 60,
+        "seventy" | "seventieth" => 70,
+        "eighty" | "eightieth" => 80,
+        "ninety" | "ninetieth" => 90,
+        _ => return None,
+    })
 }
 
-fn contains_formatting_command(text: &str) -> bool {
-    let commands: HashSet<&str> = [
-        "header",
-        "heading",
-        "headings",
-        "bullet",
-        "bullets",
-        "list",
-        "lists",
-        "bold",
-        "italics",
-        "italic",
-        "underline",
-        "underlines",
-        "title",
-        "titles",
-        "numbered",
-    ]
-    .into_iter()
-    .collect();
-    normalized_words(text)
-        .iter()
-        .any(|word| commands.contains(word.as_str()))
+fn emoji_symbols(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|character| matches!(character, '😊' | '👍' | '❤' | '🔥'))
+        .collect()
 }
 
-fn begins_with_markdown(text: &str) -> bool {
-    let Some(line) = text.lines().find(|line| !line.trim().is_empty()) else {
-        return false;
-    };
-    let line = line.trim_start();
-    if line.starts_with('#')
-        || line.starts_with("- ")
-        || line.starts_with("* ")
-        || line.starts_with("+ ")
-    {
+fn contains_markdown(text: &str) -> bool {
+    if text.contains("**") || text.contains("__") {
         return true;
     }
-
-    let digits = line.chars().take_while(char::is_ascii_digit).count();
-    digits > 0 && line[digits..].starts_with('.')
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('#')
+            || line.starts_with("- ")
+            || line.starts_with("* ")
+            || line.starts_with("+ ")
+    })
 }
 
 #[cfg(test)]
@@ -655,68 +854,206 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_suspicious_shrinkage() {
-        let raw =
-            "Troy Barnes will lead the Greendale Community College air conditioning repair team";
-
-        assert!(suspicious_error(raw, "Troy leads.").is_some());
-    }
-
-    #[test]
-    fn permits_shrinkage_after_a_correction() {
-        let raw = "Troy Barnes will lead the Greendale team no wait cancel that please";
-
-        assert!(suspicious_error(raw, "").is_none());
-    }
-
-    #[test]
-    fn permits_a_replacement_after_wait_no() {
-        let raw = "The release is on Friday. Wait, no. The release is on Tuesday.";
-
-        assert_eq!(suspicious_error(raw, "The release is on Tuesday."), None);
-    }
-
-    #[test]
-    fn rejects_undictated_markdown() {
-        assert!(suspicious_error("study at Greendale", "# Study at Greendale").is_some());
-    }
-
-    #[test]
-    fn permits_dictated_markdown() {
-        assert!(suspicious_error("header Greendale news", "# Greendale News").is_none());
-    }
-
-    #[test]
-    fn rejects_changed_dictated_words() {
-        let raw = "This is a test to see if Gemini or GPT are good models for post-processing";
-        let changed = [
-            "This is a test to see if emini or G T are good models to use for post-processing.",
-            "This is a test to see if Gemini or GeminiT are good models to use for post-processing.",
-        ];
-
-        for processed in changed {
-            assert!(
-                suspicious_error(raw, processed).is_some(),
-                "accepted changed transcript: {processed}"
-            );
-        }
-    }
-
-    #[test]
-    fn permits_delivery_only_edits() {
+    fn documented_cleanup_grammar_is_span_limited() {
         let cases = [
-            ("um Troy and and Abed", "Troy and Abed."),
-            ("please bring thx", "Please bring thanks."),
-            ("the price is twelve fifty", "The price is $12.50."),
+            ("send it period", "Send it.", "Send them."),
+            (
+                "send it comma today",
+                "Send it, today.",
+                "Send that, today.",
+            ),
+            (
+                "first line new line second line",
+                "First line\nSecond line",
+                "First line\nThird line",
+            ),
+            (
+                "first new paragraph second",
+                "First\n\nSecond",
+                "First\n\nLast",
+            ),
+            (
+                "are you ready question mark",
+                "Are you ready?",
+                "Are they ready?",
+            ),
+            ("great exclamation mark", "Great!", "Perfect!"),
+            ("bold Greendale news", "**Greendale news**", "**City news**"),
+            (
+                "italic Greendale news",
+                "*Greendale news*",
+                "*Greendale update*",
+            ),
+            ("header Greendale news", "# Greendale News", "# City News"),
+            ("bullet point call Troy", "- Call Troy", "- Call Abed"),
+            ("buy milk no wait buy water", "Buy water.", "Buy juice."),
+            ("buy milk wait no buy water", "Buy water.", "Buy juice."),
+            (
+                "tell Troy no actually tell Abed",
+                "Tell Abed.",
+                "Tell Annie.",
+            ),
+            (
+                "send Monday scratch that send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            (
+                "send Monday delete that send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            (
+                "send Monday never mind send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            (
+                "send Monday cancel that send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            (
+                "send Monday, actually send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            (
+                "send Monday, sorry send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            (
+                "send Monday, oops send Tuesday",
+                "Send Tuesday.",
+                "Send Friday.",
+            ),
+            ("smiley face", "😊", "😀"),
+            ("thumbs up", "👍", "😊"),
+            ("heart emoji", "❤️", "🔥"),
+            ("fire emoji", "🔥", "❤"),
+            ("um Troy and and Abed", "Troy and Abed.", "Troy and Annie."),
+            (
+                "please bring thx",
+                "Please bring thanks.",
+                "Please bring food.",
+            ),
+            (
+                "the total is twenty one",
+                "The total is 21.",
+                "The total is 22.",
+            ),
+            ("meet at five thirty", "Meet at 5:30.", "Meet at 5:45."),
+            (
+                "the price is twelve fifty dollars",
+                "The price is $12.50.",
+                "The price is $13.50.",
+            ),
+            (
+                "August twenty fourth 2026",
+                "August 24th, 2026.",
+                "August 25th, 2026.",
+            ),
         ];
-
-        for (raw, processed) in cases {
+        for (raw, accepted, rejected) in cases {
             assert_eq!(
-                suspicious_error(raw, processed),
+                suspicious_error(raw, accepted),
                 None,
-                "rejected delivery-only edit: {processed}"
+                "rejected documented cleanup: {raw:?} -> {accepted:?}"
+            );
+            assert!(
+                suspicious_error(raw, rejected).is_some(),
+                "accepted rewrite: {rejected}"
             );
         }
+    }
+
+    #[test]
+    fn incidental_command_words_remain_literal() {
+        let cases = [
+            "I actually agree",
+            "There is no problem",
+            "Wait for Troy",
+            "The period was difficult",
+            "The title and list are ready",
+            "The header contains news",
+        ];
+        for text in cases {
+            assert_eq!(
+                suspicious_error(text, text),
+                None,
+                "treated literal content as a command"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_changed_dates_currency_times_numbers_and_identifiers() {
+        for (raw, changed) in [
+            ("version AB 123", "Version AB 124."),
+            ("August twenty fourth 2026", "August 24th, 2027."),
+            ("meet at five thirty", "Meet at 6:30."),
+            ("twelve fifty dollars", "$12.60"),
+            ("twelve fifty dollars", "12.50"),
+            ("twelve fifty", "$12.50"),
+            ("twenty one files", "22 files"),
+        ] {
+            assert!(
+                suspicious_error(raw, changed).is_some(),
+                "accepted changed value: {changed}"
+            );
+        }
+    }
+
+    #[test]
+    fn number_conversion_is_optional() {
+        for text in [
+            "twenty one files",
+            "meet at five thirty",
+            "August twenty fourth 2026",
+            "twelve fifty dollars",
+        ] {
+            assert_eq!(
+                suspicious_error(text, text),
+                None,
+                "rejected unchanged spoken numbers in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_undictated_markdown_and_emoji() {
+        assert!(suspicious_error("study at Greendale", "# Study at Greendale").is_some());
+        assert!(suspicious_error("study at Greendale", "Study at Greendale 😊").is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_credentials_preserve_the_complete_final_transcript() {
+        let config = PostProcessingConfig {
+            enabled: true,
+            ..PostProcessingConfig::default()
+        };
+        let final_transcript = "First sentence. The final sentence must also remain.";
+
+        let result = refine(&config, None, final_transcript).await;
+
+        assert_eq!(result.text, final_transcript);
+        assert!(result.warning.unwrap().contains("no OpenRouter API token"));
+    }
+
+    #[tokio::test]
+    async fn provider_configuration_errors_preserve_the_complete_final_transcript() {
+        let config = PostProcessingConfig {
+            enabled: true,
+            model: Some("not-a-real-model".to_owned()),
+            ..PostProcessingConfig::default()
+        };
+        let final_transcript = "Corrected final decode. One more sentence.";
+
+        let result = refine(&config, Some("unused-token"), final_transcript).await;
+
+        assert_eq!(result.text, final_transcript);
+        assert!(result.warning.unwrap().contains("valid models"));
     }
 
     #[test]

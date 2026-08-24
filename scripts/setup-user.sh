@@ -40,6 +40,7 @@ wait_for_daemon() {
 }
 
 main() {
+  local was_recording=false
   while (( $# > 0 )); do
     case "$1" in
       -h | --help)
@@ -57,12 +58,21 @@ main() {
   require_command milevox-download-model
   require_command systemctl
 
+  if milevox status >/dev/null 2>&1 &&
+    ! systemctl --user is-active --quiet milevox.service; then
+    fail "stop the manually running Milevox daemon first"
+  fi
+  if milevox status 2>/dev/null | grep -qi recording; then
+    was_recording=true
+  fi
   milevox-download-model
   systemctl --user daemon-reload ||
     fail "could not reload the systemd user manager"
-  systemctl --user enable --now milevox.service ||
-    fail "could not enable and start milevox.service"
+  systemctl --user enable milevox.service || fail "could not enable milevox.service"
+  systemctl --user restart milevox.service || fail "could not restart milevox.service"
   wait_for_daemon
+
+  [[ "$was_recording" == false ]] || echo "Warning: the active recording was interrupted." >&2
 
   echo "Milevox is ready."
 }
