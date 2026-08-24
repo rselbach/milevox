@@ -3,12 +3,14 @@ import Quickshell
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
+import "MilevoxStatusLogic.js" as StatusLogic
 
 Item {
   id: root
   property real phase: 0
   property bool overlayVisible: false
   property bool fading: false
+  readonly property var status: MilevoxStatus
   readonly property bool warning: status.hasWarning && status.state === "idle"
   readonly property color statusColor: status.state === "error" || warning ? Color.urgent
     : status.recording ? Color.accent : Util.alpha(Color.popups.text, 0.55)
@@ -27,16 +29,17 @@ Item {
   function hideOverlay(delay) { hideTimer.interval = delay; hideTimer.restart() }
   function beginFade() { if (!overlayVisible) return; fading = true; closeTimer.restart() }
 
-  MilevoxStatus {
-    id: status
-    onEventReceived: function(event, previousState, initial) {
-      if (recording || busy) root.showOverlay()
-      else if (state === "error") { root.showOverlay(); root.hideOverlay(4000) }
-      else if (state === "idle" && (transcript !== "" || hasWarning) && !initial) {
-        root.showOverlay(); root.hideOverlay(hasWarning ? 4000 : 1800)
+  Connections {
+    target: status
+    function onEventReceived(event, previousState, initial) {
+      if (status.recording || status.busy) root.showOverlay()
+      else if (status.state === "error") { root.showOverlay(); root.hideOverlay(4000) }
+      else if (StatusLogic.shouldShowCompletionOverlay(
+        status.state, status.transcript, status.hasWarning, initial)) {
+        root.showOverlay(); root.hideOverlay(status.hasWarning ? 4000 : 1800)
       } else root.beginFade()
     }
-    onStateChanged: if (!available) root.beginFade()
+    function onStateChanged() { if (!status.available) root.beginFade() }
   }
 
   Timer { id: hideTimer; onTriggered: root.beginFade() }
@@ -81,6 +84,7 @@ Item {
         Text {
           width: parent.width
           text: root.displayText
+          textFormat: Text.PlainText
           color: status.state === "error" || root.warning ? Color.urgent : Color.popups.text
           font.family: Style.font.family
           font.pixelSize: Style.font.body

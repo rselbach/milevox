@@ -66,7 +66,7 @@ main() {
   require_command sha256sum
 
   repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-  dist_dir="${repo_dir}/dist"
+  dist_dir="${MILEVOX_DIST_DIR:-${repo_dir}/dist}"
   archive_path="$(realpath -- "${archive_argument}")"
   [[ -f "${archive_path}" ]] || fail "archive not found: ${archive_path}"
   archive_name="$(basename -- "${archive_path}")"

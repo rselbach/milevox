@@ -16,10 +16,10 @@ depends=(
   'libpipewire'
   'pipewire-audio'
   'wl-clipboard'
-  'wtype'
+  'wtype>=0.4'
 )
 
-options=('!debug' '!strip')
+options=('!debug')
 install=milevox.install
 
 _archive="milevox-linux-@ARCH@.tar.gz"
@@ -49,7 +49,7 @@ package() {
     "${pkgdir}/usr/share/doc/${pkgname}/environment.example"
   install -Dm644 "${source_dir}/README.md" \
     "${pkgdir}/usr/share/doc/${pkgname}/README.md"
-  for doc in configuration diagnostics privacy; do
+  for doc in configuration diagnostics privacy release-notes; do
     install -Dm644 "${source_dir}/docs/${doc}.md" \
       "${pkgdir}/usr/share/doc/${pkgname}/docs/${doc}.md"
   done

@@ -89,6 +89,11 @@ main() {
 
   data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
   model_dir="${1:-${data_home}/milevox/models/${MODEL_NAME}}"
+  cat <<EOF
+Milevox uses an English speech model.
+The model download is about 660 MB. Keep at least 1 GB free before continuing.
+Model directory: ${model_dir}
+EOF
   mkdir -p -- "${model_dir}"
 
   download_file \

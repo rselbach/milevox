@@ -9,6 +9,12 @@ Release packages are available for `x86_64` and `aarch64`. Generic Linux
 binaries require glibc 2.35 or newer and `GLIBCXX_3.4.30` or newer. Milevox
 also needs PipeWire and, on Wayland, `wtype` and `wl-copy` for delivery.
 
+The pinned Parakeet model recognizes English. Initial setup downloads about
+660 MB of model data. Keep at least 1 GB free in your XDG data directory before
+installation. The default model path is
+`$XDG_DATA_HOME/milevox/models/parakeet-tdt-0.6b-v2-int8`, normally
+`~/.local/share/milevox/models/parakeet-tdt-0.6b-v2-int8`.
+
 On an Arch-based system, download the package for your architecture and run:
 
 ```sh
@@ -29,9 +35,10 @@ Release archives additionally contain a per-user `install.sh` installer.
 ## First dictation
 
 Start dictation with `milevox record toggle`, speak, then run the command again
-to stop. Milevox transcribes and types into the focused application. If typing
-is unavailable and clipboard fallback is enabled, the text is copied instead;
-paste it manually. Omarchy users can use `SUPER + CTRL + X` or hold `F9`.
+to stop. Milevox transcribes and copies the result to the clipboard. You can
+explicitly opt in to typing into a verified output target. Omarchy users can
+use `SUPER + CTRL + X` or hold `F9`.
 
 See [configuration](docs/configuration.md), [diagnostics](docs/diagnostics.md),
-[privacy](docs/privacy.md), and the [Omarchy GUI guide](guis/omarchy/README.md).
+[privacy](docs/privacy.md), [release notes](docs/release-notes.md), and the
+[Omarchy GUI guide](https://github.com/rselbach/milevox/blob/main/guis/omarchy/README.md).

@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  core:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -22,7 +22,79 @@ jobs:
             libasound2-dev \
             libpipewire-0.3-dev \
             libssl-dev \
+            jq \
             pkg-config \
             shellcheck
       - name: Complete CI check
-        run: make check-ci
+        run: make check-core-ci
+
+  gui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install GUI test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            curl \
+            jq \
+            qml6-module-qtquick \
+            qml6-module-qttest \
+            qt6-declarative-dev-tools
+      - name: Run GUI behavior tests
+        run: make check-gui-ci
+      - name: Run pinned official Omarchy validator
+        env:
+          OMARCHY_VALIDATOR_SHA256: f7507e5042eb970e3dc918bdf6bf251c7557443892a77e71a17d7019ddde72c8
+          OMARCHY_VALIDATOR_URL: https://raw.githubusercontent.com/basecamp/omarchy/753d80c8748cac1ecdf030eae7c463b28e71e359/bin/omarchy-plugin-validate
+        run: |
+          validator="$(mktemp)"
+          curl --fail --location --silent --show-error \
+            --output "${validator}" "${OMARCHY_VALIDATOR_URL}"
+          printf '%s  %s\n' "${OMARCHY_VALIDATOR_SHA256}" "${validator}" \
+            | sha256sum --check -
+          chmod 0755 "${validator}"
+          "${validator}" ./guis/omarchy
+
+  package-smoke:
+    needs: core
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install package build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            binutils \
+            build-essential \
+            jq \
+            libasound2-dev \
+            libpipewire-0.3-dev \
+            libssl-dev \
+            pkg-config
+      - name: Build and inspect release archives
+        run: make package-smoke
+      - name: Build native pacman packages
+        run: |
+          docker run --rm --volume "${PWD}:/workspace" --workdir /workspace \
+            archlinux@sha256:714acd1eef9ae997d95691b1c5220ada0076185b77857c1813f02de0fa83cf7b \
+            bash -lc '
+              set -euo pipefail
+              pacman -Syu --noconfirm --needed base-devel
+              useradd --create-home builder
+              chown -R builder:builder /workspace/dist
+              runuser -u builder -- ./scripts/package-arch-release.sh milevox \
+                "dist/milevox-linux-x86_64.tar.gz"
+              archive="$(find dist -name "milevox-omarchy-*.tar.gz" -print -quit)"
+              runuser -u builder -- ./scripts/package-arch-release.sh \
+                milevox-omarchy "${archive}"
+              version="${archive##*milevox-omarchy-}"
+              version="${version%.tar.gz}"
+              test "$(find dist -name "milevox-${version}-*.pkg.tar.zst" | wc -l)" -eq 1
+              test "$(find dist -name "milevox-omarchy-${version}-*.pkg.tar.zst" | wc -l)" -eq 1
+              core_package="$(find dist -name "milevox-${version}-*.pkg.tar.zst" -print -quit)"
+              package_unit="$(mktemp)"
+              bsdtar --extract --to-stdout --file "${core_package}" \
+                usr/lib/systemd/user/milevox.service >"${package_unit}"
+              MILEVOX_PACKAGE_UNIT="${package_unit}" ./tests/systemd-service.sh
+            '

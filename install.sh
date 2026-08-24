@@ -31,10 +31,20 @@ require_command() {
 wait_for_daemon() {
   local binary="$1"
   local attempt
+  local status
 
-  for (( attempt = 0; attempt < 50; attempt++ )); do
-    if "${binary}" status >/dev/null 2>&1; then
-      return
+  # The transcription worker allows up to five minutes for a cold model load.
+  for (( attempt = 0; attempt < 3600; attempt++ )); do
+    if status="$("${binary}" status 2>/dev/null)"; then
+      if grep -Eq '"state"[[:space:]]*:[[:space:]]*"idle"' <<<"${status}"; then
+        return
+      fi
+      if grep -Eq '"code"[[:space:]]*:[[:space:]]*"model_unavailable"' \
+        <<<"${status}" ||
+        grep -Eq '"state"[[:space:]]*:[[:space:]]*"error"' <<<"${status}"; then
+        printf '%s\n' "${status}" >&2
+        fail "Milevox model is unavailable"
+      fi
     fi
     sleep 0.1
   done
@@ -113,7 +123,7 @@ main() {
 
   install -Dm0644 "${repo_dir}/packaging/systemd/milevox.service" \
     "${systemd_dir}/milevox.service"
-  mkdir -p -- "${config_home}/milevox"
+  install -d -m0700 "${config_home}/milevox"
   if [[ ! -e "${config_home}/milevox/environment" ]]; then
     install -m0600 "${repo_dir}/packaging/systemd/environment" \
       "${config_home}/milevox/environment"

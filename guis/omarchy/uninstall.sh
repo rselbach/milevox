@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# Remove the Milevox Omarchy plugin and managed keybindings.
+
 set -euo pipefail
 readonly PLUGIN_ID=io.github.rselbach.milevox
 # shellcheck source=guis/omarchy/bindings-common.sh
@@ -41,7 +44,9 @@ main() {
   trap rollback EXIT
   if [[ $online == true && $prior_enabled == true ]]; then omarchy plugin disable "$PLUGIN_ID" >/dev/null; fail_at plugin-disabled; fi
   if [[ -L $plugin ]]; then unlink -- "$plugin"; elif [[ -d $plugin ]]; then
-    rm -f -- "$plugin/manifest.json" "$plugin/Panel.qml" "$plugin/MilevoxOverlay.qml" "$plugin/MilevoxStatus.qml" "$plugin/Service.qml"
+    rm -f -- "$plugin/manifest.json" "$plugin/qmldir" "$plugin/Panel.qml" \
+      "$plugin/MilevoxOverlay.qml" "$plugin/MilevoxStatus.qml" \
+      "$plugin/MilevoxStatusLogic.js" "$plugin/Service.qml"
     rmdir -- "$plugin" 2>/dev/null || true
   fi
   fail_at plugin-files

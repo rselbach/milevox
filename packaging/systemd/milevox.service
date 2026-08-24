@@ -10,6 +10,18 @@ Restart=on-failure
 RestartSec=5
 Environment=XDG_RUNTIME_DIR=%t
 EnvironmentFile=-%E/milevox/environment
+NoNewPrivileges=true
+UMask=0077
+LimitCORE=0
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=graphical-session.target

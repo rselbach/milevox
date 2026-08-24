@@ -1,0 +1,10 @@
+[advisories]
+ignore = [
+  # paste is unmaintained through tokenizers and parakeet-rs.
+  # Remove this allowance when G9 can use an upstream release without paste.
+  "RUSTSEC-2024-0436",
+]
+
+[output]
+deny = ["warnings"]
+quiet = false

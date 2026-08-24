@@ -12,6 +12,7 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property var status: MilevoxStatus
   readonly property bool settingsEnabled: status.settingsAvailable && !status.recording
     && !status.busy && !status.actionRunning
   readonly property string primaryLabel: !status.available ? "Restart"
@@ -30,9 +31,9 @@ Panel {
     if (settingsEnabled) status.run(["settings", "set"].concat(args))
   }
 
-  MilevoxStatus {
-    id: status
-    onTokenSaved: tokenField.text = ""
+  Connections {
+    target: status
+    function onTokenSaved() { tokenField.text = "" }
   }
 
   BarIconButton {
@@ -83,6 +84,7 @@ Panel {
         visible: status.displayMessage !== ""
         width: parent.width
         text: status.displayMessage
+        textFormat: Text.PlainText
         color: status.state === "error" || !status.available || status.hasWarning ? root.urgent : root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -242,12 +244,26 @@ Panel {
         Text {
           width: parent.width
           text: status.partialTranscript !== "" && status.state !== "idle" ? status.partialTranscript : status.transcript
+          textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
           maximumLineCount: 4
           elide: Text.ElideRight
+        }
+        Button {
+          visible: status.transcript !== ""
+          text: "Copy transcript"
+          bordered: true
+          focusable: true
+          enabled: !status.actionRunning
+          foreground: root.foreground
+          accent: Color.accent
+          fontFamily: root.fontFamily
+          Accessible.role: Accessible.Button
+          Accessible.name: "Copy latest transcript"
+          onClicked: status.copyTranscript()
         }
       }
 

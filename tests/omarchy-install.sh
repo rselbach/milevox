@@ -81,7 +81,14 @@ case $name in
       *) exit 1 ;;
     esac
     ;;
-  milevox|milevox-setup) ;;
+  milevox)
+    [[ ! -f $state/milevox-offline ]]
+    ;;
+  milevox-setup)
+    [[ ! -f $state/fail-setup ]] || exit 1
+    rm -f -- "$state/milevox-offline"
+    touch "$state/setup-complete"
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -191,7 +198,10 @@ test_normal_install_and_upgrade() {
   local first
   new_case normal-install
   run_install >/dev/null
-  for file in manifest.json Panel.qml MilevoxOverlay.qml MilevoxStatus.qml; do
+  ! grep -q '^milevox-setup ' "$STATE_DIR/commands.log" ||
+    fail "online install invoked milevox-setup"
+  for file in manifest.json qmldir Panel.qml MilevoxOverlay.qml \
+    MilevoxStatus.qml MilevoxStatusLogic.js; do
     [[ -f $PLUGIN/$file ]] || fail "install omitted $file"
   done
   [[ $(stat -c %a -- "$BINDINGS") == 640 ]] || fail "install changed bindings mode"
@@ -205,6 +215,32 @@ test_normal_install_and_upgrade() {
   cmp -- "$first" "$BINDINGS" || fail "repeated install changed managed bindings"
   [[ $(grep -Fxc -- '-- milevox:begin' "$BINDINGS") == 1 ]] || fail "upgrade duplicated markers"
   assert_clean_transaction_files
+}
+
+test_daemon_setup_preflight() {
+  local before
+
+  new_case offline-daemon
+  touch "$STATE_DIR/milevox-offline"
+  run_install >/dev/null
+  [[ -f $STATE_DIR/setup-complete ]] ||
+    fail "offline install did not invoke milevox-setup"
+  [[ $(grep -c '^milevox-setup ' "$STATE_DIR/commands.log") == 1 ]] ||
+    fail "offline install invoked milevox-setup more than once"
+
+  new_case setup-failure
+  touch "$STATE_DIR/milevox-offline" "$STATE_DIR/fail-setup"
+  before=$CASE_DIR/bindings-before
+  cp -p -- "$BINDINGS" "$before"
+  if run_install >/dev/null 2>&1; then
+    fail "install ignored a milevox-setup failure"
+  fi
+  cmp -- "$before" "$BINDINGS" ||
+    fail "setup failure changed bindings"
+  [[ ! -e $PLUGIN ]] ||
+    fail "setup failure installed plugin files"
+  ! grep -q '^hyprctl reload' "$STATE_DIR/commands.log" ||
+    fail "setup failure reloaded Hyprland"
 }
 
 test_install_preflight_failures() {
@@ -345,6 +381,7 @@ main() {
   "$REPO_DIR/guis/omarchy/install.sh" --help >/dev/null
   "$REPO_DIR/guis/omarchy/uninstall.sh" --help >/dev/null
   test_normal_install_and_upgrade
+  test_daemon_setup_preflight
   test_install_preflight_failures
   test_install_rollbacks
   test_uninstall_and_offline_paths
