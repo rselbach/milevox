@@ -17,3 +17,14 @@ post_upgrade() {
 
 EOF
 }
+
+pre_remove() {
+  cat <<'EOF'
+
+==> Remove the Milevox GUI integration before removing this package:
+      milevox-omarchy uninstall
+
+    This preserves Milevox configuration, credentials, logs, and models.
+
+EOF
+}

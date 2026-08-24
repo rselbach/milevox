@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -18,13 +17,9 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
+        let Some(contents) = private_file::read_to_string(path)? else {
             return Ok(Self::default());
-        }
-
-        private_file::secure(path)?;
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("failed to read configuration at {}", path.display()))?;
+        };
         toml::from_str(&contents)
             .with_context(|| format!("failed to parse configuration at {}", path.display()))
     }
@@ -75,12 +70,10 @@ impl PostProcessingProvider {
 }
 
 fn load_document(path: &Path) -> Result<DocumentMut> {
-    if !path.exists() {
+    let Some(contents) = private_file::read_to_string(path)? else {
         return Ok(DocumentMut::new());
-    }
-    private_file::secure(path)?;
-    fs::read_to_string(path)
-        .with_context(|| format!("failed to read configuration at {}", path.display()))?
+    };
+    contents
         .parse::<DocumentMut>()
         .with_context(|| format!("failed to parse configuration at {}", path.display()))
 }
@@ -125,8 +118,8 @@ impl Default for PostProcessingConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
-    #[default]
     Type,
+    #[default]
     Clipboard,
 }
 
@@ -140,8 +133,8 @@ pub struct OutputConfig {
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
-            mode: OutputMode::Type,
-            clipboard_fallback: true,
+            mode: OutputMode::Clipboard,
+            clipboard_fallback: false,
         }
     }
 }
@@ -167,6 +160,8 @@ mod tests {
         assert!(!config.post_processing.enabled);
         assert!(!config.debug.enabled);
         assert!(config.transcription.model_path.is_none());
+        assert!(matches!(config.output.mode, OutputMode::Clipboard));
+        assert!(!config.output.clipboard_fallback);
     }
 
     #[test]
@@ -182,6 +177,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("milevox-config-{}-{id}", std::process::id()));
         let path = directory.join("config.toml");
+        std::fs::create_dir(&directory).unwrap();
         let mut config = Config::default();
         config.post_processing.enabled = true;
         config.post_processing.provider = PostProcessingProvider::OpencodeZen;

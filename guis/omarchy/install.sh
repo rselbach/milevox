@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# Install or update the Milevox Omarchy plugin and managed keybindings.
+
 set -euo pipefail
 
 readonly PLUGIN_ID=io.github.rselbach.milevox
@@ -47,7 +50,10 @@ main() {
     [[ -n $HYPRLAND_INSTANCE_SIGNATURE ]] || fail "cannot choose Hyprland instance (set HYPRLAND_INSTANCE_SIGNATURE or run exactly one instance)"
   fi
   base=$(hyprctl configerrors 2>&1) || fail "could not read Hyprland config errors"
-  command -v milevox-setup >/dev/null && milevox-setup >/dev/null || milevox status >/dev/null 2>&1 || fail "Milevox is not ready"
+  if ! milevox status >/dev/null 2>&1; then
+    command -v milevox-setup >/dev/null || fail "milevox-setup is required while Milevox is offline"
+    milevox-setup >/dev/null || fail "Milevox setup failed"
+  fi
   mkdir -p -- "$(dirname -- "$plugin")"
   work=$(mktemp -d "$(dirname -- "$plugin")/.milevox-txn.XXXXXX")
   plugin_stage=$work/staged-plugin
@@ -72,10 +78,14 @@ main() {
     rm -rf -- "$work"; rm -f -- "$stage"
   }
   trap rollback EXIT
-  rm -f -- "$plugin_stage/manifest.json" "$plugin_stage/Panel.qml" \
+  rm -f -- "$plugin_stage/manifest.json" "$plugin_stage/qmldir" "$plugin_stage/Panel.qml" \
     "$plugin_stage/MilevoxOverlay.qml" "$plugin_stage/MilevoxStatus.qml" \
+    "$plugin_stage/MilevoxStatusLogic.js" \
     "$plugin_stage/Service.qml"
-  for arg in manifest.json Panel.qml MilevoxOverlay.qml MilevoxStatus.qml; do install -m 0644 "$source/$arg" "$plugin_stage/$arg"; done
+  for arg in manifest.json qmldir Panel.qml MilevoxOverlay.qml \
+    MilevoxStatus.qml MilevoxStatusLogic.js; do
+    install -m 0644 "$source/$arg" "$plugin_stage/$arg"
+  done
   if [[ $plugin_existed == true ]]; then
     mv -- "$plugin" "$work/live-plugin"
     plugin_mutated=true

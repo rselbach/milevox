@@ -40,7 +40,7 @@ main() {
   require_command tar
 
   repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-  dist_dir="${repo_dir}/dist"
+  dist_dir="${MILEVOX_DIST_DIR:-${repo_dir}/dist}"
   version="$(project_version "${repo_dir}")" || fail "invalid project version"
   manifest_version="$(jq -r '.version // empty' \
     "${repo_dir}/guis/omarchy/manifest.json")"
@@ -63,9 +63,11 @@ main() {
     "${stage_dir}/"
   install -m 0644 \
     "${repo_dir}/guis/omarchy/manifest.json" \
+    "${repo_dir}/guis/omarchy/qmldir" \
     "${repo_dir}/guis/omarchy/Panel.qml" \
     "${repo_dir}/guis/omarchy/MilevoxOverlay.qml" \
     "${repo_dir}/guis/omarchy/MilevoxStatus.qml" \
+    "${repo_dir}/guis/omarchy/MilevoxStatusLogic.js" \
     "${repo_dir}/guis/omarchy/README.md" \
     "${repo_dir}/LICENSE" \
     "${stage_dir}/"

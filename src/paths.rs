@@ -5,7 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 pub fn config_path() -> PathBuf {
-    config_home().join("milevox/config.toml")
+    config_dir().join("config.toml")
+}
+
+pub fn config_dir() -> PathBuf {
+    config_home().join("milevox")
 }
 
 pub fn credentials_path(config_path: &Path) -> PathBuf {
@@ -76,7 +80,15 @@ pub fn default_model_path() -> PathBuf {
 }
 
 pub fn debug_log_path() -> PathBuf {
-    state_home().join("milevox/debug.log")
+    state_dir().join("debug.log")
+}
+
+pub fn state_dir() -> PathBuf {
+    state_home().join("milevox")
+}
+
+pub fn is_app_private_dir(path: &Path) -> bool {
+    path == config_dir() || path == state_dir()
 }
 
 fn config_home() -> PathBuf {

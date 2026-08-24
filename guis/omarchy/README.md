@@ -25,8 +25,9 @@ sudo pacman -R milevox-omarchy
 ```
 
 The source equivalent is `./guis/omarchy/uninstall.sh`. GUI removal preserves
-the daemon, configuration, credentials, logs, and downloaded models. See
-[privacy](../../docs/privacy.md) to remove those separately.
+the daemon, configuration, credentials, logs, and downloaded models. See the
+[privacy and data retention guide](https://github.com/rselbach/milevox/blob/main/docs/privacy.md)
+to remove those separately.
 
 ## Controls
 
@@ -39,8 +40,10 @@ the daemon, configuration, credentials, logs, and downloaded models. See
 
 Stopping submits captured audio for transcription. Cancelling discards the
 current recording or in-progress work. A completed warning remains visible in
-the bar after the overlay closes. Clipboard fallback means delivery could not
-type into the focused app: paste the copied transcript manually.
+the bar after the overlay closes. Completed transcripts are copied to the
+clipboard by default, where a clipboard manager may retain them. Explicit type
+mode and opt-in fallback are described in the
+[configuration guide](https://github.com/rselbach/milevox/blob/main/docs/configuration.md).
 
 ## Recovery
 
@@ -52,8 +55,8 @@ journalctl --user -u milevox.service -n 100
 ```
 
 If settings disappear, the daemon connection was lost; they return after a
-successful reconnect. For deeper investigation see
-[diagnostics](../../docs/diagnostics.md).
+successful reconnect. For deeper investigation, see the
+[diagnostics guide](https://github.com/rselbach/milevox/blob/main/docs/diagnostics.md).
 
 For source development, validate from the repository root with `make check-guis`
 and restart the shell after changes (`omarchy restart shell`).

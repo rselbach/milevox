@@ -42,7 +42,7 @@ main() {
   require_command tar
 
   repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-  dist_dir="${repo_dir}/dist"
+  dist_dir="${MILEVOX_DIST_DIR:-${repo_dir}/dist}"
   project_version "${repo_dir}" >/dev/null || fail "invalid project version"
 
   architecture="$(normalize_architecture "$(uname -m)")"
@@ -78,6 +78,7 @@ main() {
     "${stage_dir}/"
   install -m 0644 "${repo_dir}/docs/configuration.md" \
     "${repo_dir}/docs/diagnostics.md" "${repo_dir}/docs/privacy.md" \
+    "${repo_dir}/docs/release-notes.md" \
     "${stage_dir}/docs/"
 
   tar --create --gzip --file "${TEMP_DIR}/${archive_name}" \

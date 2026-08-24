@@ -27,7 +27,7 @@ jobs:
       - name: Install container prerequisites
         run: |
           apt-get update
-          apt-get install --yes binutils build-essential ca-certificates cmake curl git \
+          apt-get install --yes binutils build-essential ca-certificates cmake curl git jq \
             libasound2-dev libpipewire-0.3-dev libssl-dev ninja-build pkg-config python3 python3-pip
           python3 -m pip install cmake==3.31.6
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -57,7 +57,12 @@ jobs:
           ../scripts/check-abi.sh "${binary}" "$(project_version ..)"
       - name: Build Omarchy archive
         if: matrix.arch == 'x86_64'
-        run: ./scripts/package-omarchy-release.sh
+        run: |
+          ./scripts/package-omarchy-release.sh
+          archive="$(find dist -name 'milevox-omarchy-*.tar.gz' -print -quit)"
+          ./scripts/check-release-archives.sh --omarchy-only "${archive}"
+      - name: Inspect core archive
+        run: ./scripts/check-release-archives.sh "dist/milevox-linux-${{ matrix.arch }}.tar.gz"
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: raw-release-${{ matrix.arch }}
@@ -80,6 +85,7 @@ jobs:
             archlinux@sha256:714acd1eef9ae997d95691b1c5220ada0076185b77857c1813f02de0fa83cf7b \
             bash -lc '
               set -euo pipefail
+              pacman -Syu --noconfirm --needed base-devel
               useradd --create-home builder
               chown -R builder:builder /workspace/dist
               for arch in x86_64 aarch64; do

@@ -35,9 +35,11 @@ package() {
     "${source_dir}/uninstall.sh" "${source_dir}/bindings-common.sh" \
     "${libexec_dir}/"
   install -m644 "${source_dir}/manifest.json" \
+    "${source_dir}/qmldir" \
     "${source_dir}/Panel.qml" \
     "${source_dir}/MilevoxOverlay.qml" \
-    "${source_dir}/MilevoxStatus.qml" "${libexec_dir}/"
+    "${source_dir}/MilevoxStatus.qml" \
+    "${source_dir}/MilevoxStatusLogic.js" "${libexec_dir}/"
 
   install -Dm644 "${source_dir}/README.md" \
     "${pkgdir}/usr/share/doc/${pkgname}/README.md"

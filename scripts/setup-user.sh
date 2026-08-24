@@ -27,10 +27,20 @@ require_command() {
 
 wait_for_daemon() {
   local attempt
+  local status
 
-  for (( attempt = 0; attempt < 100; attempt++ )); do
-    if milevox status >/dev/null 2>&1; then
-      return
+  # The transcription worker allows up to five minutes for a cold model load.
+  for (( attempt = 0; attempt < 3600; attempt++ )); do
+    if status="$(milevox status 2>/dev/null)"; then
+      if grep -Eq '"state"[[:space:]]*:[[:space:]]*"idle"' <<<"${status}"; then
+        return
+      fi
+      if grep -Eq '"code"[[:space:]]*:[[:space:]]*"model_unavailable"' \
+        <<<"${status}" ||
+        grep -Eq '"state"[[:space:]]*:[[:space:]]*"error"' <<<"${status}"; then
+        printf '%s\n' "${status}" >&2
+        fail "Milevox model is unavailable"
+      fi
     fi
     sleep 0.1
   done
@@ -40,7 +50,10 @@ wait_for_daemon() {
 }
 
 main() {
-  local was_recording=false
+  local config_home
+  local environment_file
+  local environment_source
+  local status
   while (( $# > 0 )); do
     case "$1" in
       -h | --help)
@@ -56,23 +69,38 @@ main() {
   (( EUID != 0 )) || fail "run this command without sudo"
   require_command milevox
   require_command milevox-download-model
+  require_command install
   require_command systemctl
 
-  if milevox status >/dev/null 2>&1 &&
-    ! systemctl --user is-active --quiet milevox.service; then
-    fail "stop the manually running Milevox daemon first"
+  status=""
+  if status="$(milevox status 2>/dev/null)"; then
+    if ! systemctl --user is-active --quiet milevox.service; then
+      fail "stop the manually running Milevox daemon first"
+    fi
+    if grep -Eq '"state"[[:space:]]*:[[:space:]]*"(recording|transcribing|refining|canceling)"' \
+      <<<"${status}"; then
+      fail "Milevox is busy; wait for it to become idle or cancel the active dictation"
+    fi
   fi
-  if milevox status 2>/dev/null | grep -qi recording; then
-    was_recording=true
+
+  config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+  environment_file="${config_home}/milevox/environment"
+  environment_source="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/packaging/systemd/environment"
+  if [[ ! -f "${environment_source}" ]]; then
+    environment_source="/usr/share/doc/milevox/environment.example"
   fi
+  install -d -m0700 "${config_home}/milevox"
+  if [[ ! -e "${environment_file}" ]]; then
+    [[ -f "${environment_source}" ]] || fail "service environment example not found"
+    install -m0600 "${environment_source}" "${environment_file}"
+  fi
+
   milevox-download-model
   systemctl --user daemon-reload ||
     fail "could not reload the systemd user manager"
   systemctl --user enable milevox.service || fail "could not enable milevox.service"
   systemctl --user restart milevox.service || fail "could not restart milevox.service"
   wait_for_daemon
-
-  [[ "$was_recording" == false ]] || echo "Warning: the active recording was interrupted." >&2
 
   echo "Milevox is ready."
 }
