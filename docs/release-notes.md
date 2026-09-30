@@ -2,19 +2,25 @@
 
 ## 0.2.0, unreleased
 
+### Transcription
+
+Updated `parakeet-rs` to 0.3.8, including its NeMo-aligned audio preprocessing
+and TDT timestamp corrections. Recordings shorter than one 10 ms feature
+frame now produce a clear error instead of reaching the model with no
+features; sub-frame live previews are skipped.
+
 ### Known dependency issue
 
-Milevox still includes `paste` 1.0.15 through `parakeet-rs` 0.3.7 and
+Milevox still includes `paste` 1.0.15 through `parakeet-rs` 0.3.8 and
 `tokenizers` 0.23.1. RustSec classifies `paste` as unmaintained in
 [`RUSTSEC-2024-0436`](https://rustsec.org/advisories/RUSTSEC-2024-0436.html).
 The advisory is informational. The audit configuration temporarily permits
 only this advisory.
 
-As of August 24, 2026, `parakeet-rs` 0.3.7 and `tokenizers` 0.23.1 are the
-latest releases, and `tokenizers` still depends on `paste`. Milevox cannot
-remove the dependency with a compatible upstream release yet. The project
-does not use a private fork. Remove the audit allowance when an upstream
-release removes `paste` and the model transcription and release checks pass.
+The `parakeet-rs` 0.3.8 update retains the locked `tokenizers` 0.23.1
+dependency, which still depends on `paste`. The project does not use a
+private fork. Remove the audit allowance when an upstream release removes
+`paste` and the model transcription and release checks pass.
 
 ### Validation follow-ups
 

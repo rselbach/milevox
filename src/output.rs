@@ -1073,7 +1073,7 @@ printf '%s' '[{"instance":"greendale-one"},{"instance":"greendale-two"}]'"#,
         .await
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("timed out"));
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
         let pid = fs::read_to_string(program.with_extension("pid"))
             .unwrap()
             .parse::<i32>()
@@ -1093,7 +1093,7 @@ printf '%s' '[{"instance":"greendale-one"},{"instance":"greendale-two"}]'"#,
         let program = fake_program(
             &directory,
             "wtype",
-            "printf '%s' \"$$\" > \"${0}.pid\"\nsleep 30 &\nprintf '%s' \"$!\" > \"${0}.descendant\"\nexit 0",
+            "printf '%s' \"$$\" > \"${0}.pid\"\ncat >/dev/null\nsleep 30 &\nprintf '%s' \"$!\" > \"${0}.descendant\"\nexit 0",
         );
         let started = std::time::Instant::now();
 
@@ -1106,7 +1106,7 @@ printf '%s' '[{"instance":"greendale-one"},{"instance":"greendale-two"}]'"#,
         .await
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("timed out"));
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(1));
         let child_pid = fs::read_to_string(program.with_extension("pid"))
             .unwrap()
