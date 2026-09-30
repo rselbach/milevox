@@ -594,8 +594,18 @@ mod tests {
         let script = format!(
             "#!/usr/bin/env bash\n# Fake Milevox output helper.\nset -euo pipefail\n{body}\n"
         );
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut file = fs::File::create(&path).unwrap();
+        file.lock().unwrap();
+        std::io::Write::write_all(&mut file, script.as_bytes()).unwrap();
+        file.set_permissions(fs::Permissions::from_mode(0o755))
+            .unwrap();
+        drop(file);
+
+        // Concurrent forks can briefly inherit the writable descriptor.
+        // Wait until every copy closes before executing the fixture.
+        let file = fs::File::open(&path).unwrap();
+        file.lock_shared().unwrap();
+        drop(file);
         path
     }
 
@@ -922,7 +932,10 @@ printf '%s' '[{"instance":"greendale-one"},{"instance":"greendale-two"}]'"#,
         .await
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("Greendale clipboard failed"));
+        assert!(
+            format!("{error:#}").contains("Greendale clipboard failed"),
+            "{error:#}"
+        );
         assert_eq!(
             fs::read_to_string(program.with_extension("stdin")).unwrap(),
             "Troy and Abed"
