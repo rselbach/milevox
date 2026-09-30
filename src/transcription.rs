@@ -19,6 +19,8 @@ use crate::config::TranscriptionConfig;
 use crate::paths;
 
 const PARAKEET_SAMPLE_RATE: u32 = 16_000;
+// Parakeet's feature extractor needs at least one 10 ms frame.
+const PARAKEET_MIN_SAMPLES: usize = 160;
 const RESAMPLER_CHUNK_SIZE: usize = 1024;
 const MAX_METADATA_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -688,7 +690,11 @@ fn transcribe_loaded(
     metadata: &WorkerRequest,
     samples: Vec<f32>,
 ) -> Result<Option<String>> {
-    let samples = resample_mono(samples, metadata.sample_rate, PARAKEET_SAMPLE_RATE)?;
+    let Some(samples) =
+        prepare_transcription_samples(samples, metadata.sample_rate, metadata.allow_empty)?
+    else {
+        return Ok(None);
+    };
     let result = model
         .transcribe_samples(samples, PARAKEET_SAMPLE_RATE, 1, None)
         .context("Parakeet transcription failed")?;
@@ -700,6 +706,21 @@ fn transcribe_loaded(
         bail!("Parakeet returned no text");
     }
     Ok(Some(transcript))
+}
+
+fn prepare_transcription_samples(
+    samples: Vec<f32>,
+    sample_rate: u32,
+    allow_empty: bool,
+) -> Result<Option<Vec<f32>>> {
+    let samples = resample_mono(samples, sample_rate, PARAKEET_SAMPLE_RATE)?;
+    if samples.len() < PARAKEET_MIN_SAMPLES {
+        if allow_empty {
+            return Ok(None);
+        }
+        bail!("audio is too short to transcribe; record at least 10 ms of audio");
+    }
+    Ok(Some(samples))
 }
 
 fn run_fake_worker<R: Read, W: Write>(
@@ -1000,6 +1021,64 @@ mod tests {
         assert_eq!(output, [-1.0, 0.0, 1.0]);
         assert_eq!(output.as_ptr(), pointer);
         assert_eq!(output.capacity(), capacity);
+    }
+
+    #[test]
+    fn sub_frame_previews_are_skipped_and_finals_return_a_clear_error() {
+        for length in [1, PARAKEET_MIN_SAMPLES - 1] {
+            assert!(
+                prepare_transcription_samples(vec![0.0; length], PARAKEET_SAMPLE_RATE, true)
+                    .unwrap()
+                    .is_none()
+            );
+            let error =
+                prepare_transcription_samples(vec![0.0; length], PARAKEET_SAMPLE_RATE, false)
+                    .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("audio is too short to transcribe")
+            );
+        }
+    }
+
+    #[test]
+    fn one_feature_frame_is_preserved_for_previews_and_finals() {
+        for allow_empty in [true, false] {
+            let samples = vec![0.25; PARAKEET_MIN_SAMPLES];
+            let pointer = samples.as_ptr();
+            let output = prepare_transcription_samples(samples, PARAKEET_SAMPLE_RATE, allow_empty)
+                .unwrap()
+                .unwrap();
+            assert_eq!(output, vec![0.25; PARAKEET_MIN_SAMPLES]);
+            assert_eq!(output.as_ptr(), pointer);
+        }
+    }
+
+    #[test]
+    fn transcription_minimum_is_checked_after_resampling() {
+        assert!(
+            prepare_transcription_samples(vec![0.0; 477], 48_000, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            prepare_transcription_samples(vec![0.0; 480], 48_000, false)
+                .unwrap()
+                .unwrap()
+                .len(),
+            PARAKEET_MIN_SAMPLES
+        );
+    }
+
+    #[test]
+    fn preparing_empty_audio_keeps_the_existing_error() {
+        for allow_empty in [true, false] {
+            let error =
+                prepare_transcription_samples(Vec::new(), PARAKEET_SAMPLE_RATE, allow_empty)
+                    .unwrap_err();
+            assert_eq!(error.to_string(), "cannot transcribe an empty audio buffer");
+        }
     }
 
     #[test]
